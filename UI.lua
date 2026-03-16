@@ -119,8 +119,115 @@ local function setupMiniActionButton(button, width, height, text)
 end
 
 local function formatGold(value)
-    value = tonumber(value) or 0
-    return string.format("%dg", math.floor(value))
+    local number = math.floor(tonumber(value) or 0)
+    local negative = false
+    local formatted
+    local changed
+
+    if number < 0 then
+        negative = true
+        number = math.abs(number)
+    end
+
+    formatted = tostring(number)
+
+    repeat
+        formatted, changed = string.gsub(formatted, "^([0-9]+)([0-9][0-9][0-9])", "%1 %2")
+    until changed == 0
+
+    if negative then
+        formatted = "-" .. formatted
+    end
+
+    return formatted .. "g"
+end
+
+local function formatGroupedInteger(value)
+    local number = math.floor(tonumber(value) or 0)
+    local negative = false
+    local formatted
+    local changed
+
+    if number < 0 then
+        negative = true
+        number = math.abs(number)
+    end
+
+    formatted = tostring(number)
+
+    repeat
+        formatted, changed = string.gsub(formatted, "^([0-9]+)([0-9][0-9][0-9])", "%1 %2")
+    until changed == 0
+
+    if negative then
+        formatted = "-" .. formatted
+    end
+
+    return formatted
+end
+
+local function parseNumberText(value)
+    local text = tostring(value or "")
+
+    text = string.gsub(text, "[^0-9%-]", "")
+
+    if text == "" or text == "-" then
+        return nil
+    end
+
+    return tonumber(text)
+end
+
+local function formatAmount(value)
+    local number = tonumber(value) or 0
+    local absolute = math.abs(number)
+
+    if absolute >= 1000000000 then
+        if absolute < 10000000000 then
+            return string.format("%.2fB", number / 1000000000)
+        elseif absolute < 100000000000 then
+            return string.format("%.1fB", number / 1000000000)
+        end
+
+        return string.format("%.0fB", number / 1000000000)
+    end
+
+    if absolute >= 1000000 then
+        if absolute < 10000000 then
+            return string.format("%.2fM", number / 1000000)
+        elseif absolute < 100000000 then
+            return string.format("%.1fM", number / 1000000)
+        end
+
+        return string.format("%.0fM", number / 1000000)
+    end
+
+    if absolute >= 1000 then
+        if absolute < 100000 then
+            return string.format("%.1fK", number / 1000)
+        end
+
+        return string.format("%.0fK", number / 1000)
+    end
+
+    return tostring(math.floor(number + 0.5))
+end
+
+local function formatRate(value)
+    return formatAmount(value)
+end
+
+local function formatClock(value)
+    local totalSeconds = math.max(0, tonumber(value) or 0)
+    local hours = math.floor(totalSeconds / 3600)
+    local minutes = math.floor((totalSeconds % 3600) / 60)
+    local seconds = math.floor(totalSeconds % 60)
+
+    if hours > 0 then
+        return string.format("%d:%02d:%02d", hours, minutes, seconds)
+    end
+
+    return string.format("%d:%02d", minutes, seconds)
 end
 
 local function setTabButtonState(button, isActive)
@@ -138,6 +245,70 @@ local function setTabButtonState(button, isActive)
         else
             label:SetTextColor(0.92, 0.88, 0.72)
         end
+    end
+end
+
+function addon:ApplySuggestedRaiseStepForMinBid(frame, minBid, force)
+    local suggestedStep
+
+    if not frame or not frame.incrementBox or self:IsAuctionActive() then
+        return
+    end
+
+    if frame.incrementManualOverride and not force then
+        return
+    end
+
+    suggestedStep = self:GetSuggestedRaiseStepForMinBid(minBid)
+
+    if not suggestedStep then
+        return
+    end
+
+    frame.incrementBox:SetText(formatGroupedInteger(suggestedStep))
+end
+
+function addon:ApplyDefaultAuctionInputs(frame, force)
+    if not frame or self:IsAuctionActive() then
+        return
+    end
+
+    if frame.idleDefaultsApplied and not force then
+        return
+    end
+
+    if frame.minBidBox and not frame.minBidBox:HasFocus() then
+        frame.minBidBox:SetText(formatGroupedInteger(self:GetDefaultAuctionMinBid()))
+    end
+
+    if frame.incrementBox and not frame.incrementBox:HasFocus() then
+        frame.incrementBox:SetText(formatGroupedInteger(self:GetDefaultAuctionIncrement()))
+    end
+
+    if frame.durationBox and not frame.durationBox:HasFocus() then
+        frame.durationBox:SetText(tostring(self:GetDefaultAuctionDuration()))
+    end
+
+    frame.idleDefaultsApplied = true
+end
+
+function addon:ApplySuggestedMinBidForPendingItem(frame, itemLink)
+    local suggestedMinBid
+
+    if not frame or not frame.minBidBox or not frame.incrementBox or not itemLink or itemLink == "" or self:IsAuctionActive() then
+        return
+    end
+
+    suggestedMinBid = self:GetSuggestedMinBidForItem(itemLink)
+
+    if not suggestedMinBid then
+        return
+    end
+
+    if frame.lastAutoMinBidItemLink ~= itemLink then
+        frame.minBidBox:SetText(formatGroupedInteger(suggestedMinBid))
+        self:ApplySuggestedRaiseStepForMinBid(frame, suggestedMinBid, true)
+        frame.lastAutoMinBidItemLink = itemLink
     end
 end
 
@@ -243,6 +414,24 @@ if not StaticPopupDialogs["GOLDBID_PASS_CONFIRM"] then
     }
 end
 
+if not StaticPopupDialogs["GOLDBID_SKIP_LOT_CONFIRM"] then
+    StaticPopupDialogs["GOLDBID_SKIP_LOT_CONFIRM"] = {
+        text = "Скрыть окно текущего лота?\n\nОно больше не будет появляться автоматически, пока торгуется этот лот.",
+        button1 = "Пропустить",
+        button2 = "Отмена",
+        OnAccept = function()
+            addon:SkipCurrentAuctionLot(addon.pendingSkipAuctionId)
+        end,
+        OnCancel = function()
+            addon.pendingSkipAuctionId = nil
+        end,
+        timeout = 0,
+        whileDead = 1,
+        hideOnEscape = 1,
+        preferredIndex = 3,
+    }
+end
+
 if not StaticPopupDialogs["GOLDBID_RESTART_AUCTION_CONFIRM"] then
     StaticPopupDialogs["GOLDBID_RESTART_AUCTION_CONFIRM"] = {
         text = "Вы уверены, что хотите перезапустить аукцион на эту вещь?",
@@ -273,6 +462,30 @@ if not StaticPopupDialogs["GOLDBID_RESTART_AUCTION_CONFIRM"] then
     }
 end
 
+if not StaticPopupDialogs["GOLDBID_DELETE_SALE_CONFIRM"] then
+    StaticPopupDialogs["GOLDBID_DELETE_SALE_CONFIRM"] = {
+        text = "Удалить этот лот из сводки?\n\nСумма лота будет вычтена из общего банка.",
+        button1 = "Удалить",
+        button2 = "Отмена",
+        OnAccept = function()
+            local saleIndex = addon.pendingSaleDeleteIndex
+
+            if saleIndex then
+                addon:RemoveSaleAt(saleIndex)
+            end
+
+            addon.pendingSaleDeleteIndex = nil
+        end,
+        OnCancel = function()
+            addon.pendingSaleDeleteIndex = nil
+        end,
+        timeout = 0,
+        whileDead = 1,
+        hideOnEscape = 1,
+        preferredIndex = 3,
+    }
+end
+
 function addon:ShowExportWindow()
     local frame = self:CreateExportWindow()
     local text = self:BuildExportText()
@@ -286,6 +499,67 @@ function addon:ShowExportWindow()
     frame.editBox:SetHeight(math.max(260, lines * 16 + 20))
     frame.editBox:HighlightText()
     frame:Show()
+end
+
+function addon:IsAuctionWindowSuppressed(auctionId)
+    local activeAuctionId = auctionId or (self.currentAuction and self.currentAuction.id)
+
+    if not activeAuctionId or activeAuctionId == "" then
+        return false
+    end
+
+    return tostring(self.skippedAuctionId or "") == tostring(activeAuctionId)
+end
+
+function addon:ConfirmSkipAuctionLot()
+    if self:HasFullInterfaceAccess() then
+        return
+    end
+
+    if not self:IsAuctionActive() or not (self.currentAuction and self.currentAuction.id) then
+        self:Print("Нет активного аукциона.")
+        return
+    end
+
+    self.pendingSkipAuctionId = tostring(self.currentAuction.id)
+    StaticPopup_Show("GOLDBID_SKIP_LOT_CONFIRM")
+end
+
+function addon:SkipCurrentAuctionLot(targetAuctionId)
+    local activeAuctionId = tostring((self.currentAuction and self.currentAuction.id) or "")
+
+    self.pendingSkipAuctionId = nil
+
+    if self:HasFullInterfaceAccess() then
+        return
+    end
+
+    if not self:IsAuctionActive() or activeAuctionId == "" then
+        self:Print("Нет активного аукциона.")
+        return
+    end
+
+    if targetAuctionId and tostring(targetAuctionId) ~= "" and activeAuctionId ~= tostring(targetAuctionId) then
+        return
+    end
+
+    self.skippedAuctionId = activeAuctionId
+
+    if self.frame and self.frame:IsShown() then
+        self.frame:Hide()
+    end
+
+    self:Print("Текущий лот скрыт. Окно снова появится на следующем лоте.")
+end
+
+function addon:ConfirmDeleteSale(index)
+    if not self:IsPlayerController() then
+        self:Print("Удалять лоты из сводки может только мастер лутер.")
+        return
+    end
+
+    self.pendingSaleDeleteIndex = index
+    StaticPopup_Show("GOLDBID_DELETE_SALE_CONFIRM")
 end
 
 function addon:ConfirmOrStartAuction(itemLink, minBid, increment, duration)
@@ -369,6 +643,56 @@ function addon:RefreshControllerDropdown()
             frame.controllerHint:SetText("Вы можете только смотреть текущий выбор. Менять его может лидер рейда, помощник или текущий мастер лутер.")
         end
     end
+end
+
+function addon:RefreshModeDropdown()
+    local frame = self.frame or self:CreateMainWindow()
+    local dropdown = frame.modeDropDown
+    local selectedMode = self:GetCurrentAuctionMode()
+    local canChangeMode = self:IsPlayerController() and not self:IsAuctionActive()
+
+    if not dropdown or not UIDropDownMenu_Initialize then
+        return
+    end
+
+    UIDropDownMenu_Initialize(dropdown, function(selfDropDown, level)
+        local info
+        local modes = {
+            { value = "goldbid", text = "GoldBid" },
+            { value = "roll", text = "Roll" },
+        }
+        local index
+
+        if level ~= 1 then
+            return
+        end
+
+        for index = 1, table.getn(modes) do
+            info = UIDropDownMenu_CreateInfo()
+            info.text = modes[index].text
+            info.value = modes[index].value
+            info.checked = selectedMode == modes[index].value
+            info.disabled = not canChangeMode
+            info.func = function()
+                addon:SetSelectedAuctionMode(modes[index].value)
+                addon:RefreshModeDropdown()
+            end
+            UIDropDownMenu_AddButton(info, level)
+        end
+    end)
+
+    UIDropDownMenu_SetWidth(dropdown, 110)
+    UIDropDownMenu_SetSelectedValue(dropdown, selectedMode)
+    UIDropDownMenu_SetText(dropdown, self:GetAuctionModeDisplayName(selectedMode))
+
+    if canChangeMode and UIDropDownMenu_EnableDropDown then
+        UIDropDownMenu_EnableDropDown(dropdown)
+    elseif not canChangeMode and UIDropDownMenu_DisableDropDown then
+        UIDropDownMenu_DisableDropDown(dropdown)
+    end
+
+    frame.lastModeDropdownValue = selectedMode
+    frame.lastModeDropdownCanChange = canChangeMode
 end
 
 function addon:CreateSettingsWindow()
@@ -469,7 +793,7 @@ end
 function addon:GetEffectiveRaiseStep()
     local frame = self.frame or self:CreateMainWindow()
     local auctionStep = (self.currentAuction and tonumber(self.currentAuction.increment)) or 0
-    local configuredStep = tonumber(frame.incrementBox:GetText()) or 0
+    local configuredStep = parseNumberText(frame.incrementBox:GetText()) or 0
 
     if configuredStep < auctionStep then
         configuredStep = auctionStep
@@ -485,7 +809,7 @@ end
 function addon:NormalizeClientRaiseStep()
     local frame = self.frame or self:CreateMainWindow()
     local auctionStep = (self.currentAuction and tonumber(self.currentAuction.increment)) or 0
-    local configuredStep = tonumber(frame.incrementBox:GetText()) or 0
+    local configuredStep = parseNumberText(frame.incrementBox:GetText()) or 0
 
     if configuredStep <= 0 then
         configuredStep = auctionStep > 0 and auctionStep or 1
@@ -495,7 +819,7 @@ function addon:NormalizeClientRaiseStep()
         configuredStep = auctionStep
     end
 
-    frame.incrementBox:SetText(tostring(configuredStep))
+    frame.incrementBox:SetText(formatGroupedInteger(configuredStep))
     return configuredStep
 end
 
@@ -539,7 +863,9 @@ function addon:IncrementBidAmount()
         currentBid = suggestedBase
     end
 
-    frame.bidBox:SetText(tostring(currentBid + step))
+    frame.bidPreviewBase = suggestedBase
+    frame.bidPreviewValue = currentBid + step
+    frame.bidBox:SetText(tostring(frame.bidPreviewValue))
     frame.bidManualOverride = true
 end
 
@@ -549,7 +875,7 @@ function addon:ToggleMainWindow()
     if frame:IsShown() then
         frame:Hide()
     else
-        self:ShowMainWindow()
+        self:ShowMainWindow(true)
     end
 end
 
@@ -557,9 +883,22 @@ function addon:UpdateMainWindowLayout()
     local frame = self.frame or self:CreateMainWindow()
     local hasFullAccess = self:HasFullInterfaceAccess()
     local isExpanded = hasFullAccess or frame.compactSectionOpen
+    local isRollMode = self:GetCurrentAuctionMode() == "roll"
     local compactHeight
 
     if not hasFullAccess and frame.activeTab == "split" then
+        frame.activeTab = "auction"
+    end
+
+    if not hasFullAccess and frame.activeTab == "spend" then
+        frame.activeTab = "auction"
+    end
+
+    if not hasFullAccess and frame.activeTab == "loot" then
+        frame.activeTab = "auction"
+    end
+
+    if not hasFullAccess and frame.activeTab == "damage" then
         frame.activeTab = "auction"
     end
 
@@ -573,12 +912,19 @@ function addon:UpdateMainWindowLayout()
     frame.compactPotText:SetShown(false)
     frame.header:SetShown(hasFullAccess)
     frame.compactCloseButton:SetShown(not hasFullAccess)
+    frame.compactSkipButton:SetShown(not hasFullAccess)
     frame.infoBar:SetShown(hasFullAccess)
     frame.leaderText:SetShown(hasFullAccess)
     frame.statusText:SetShown(hasFullAccess)
     frame.auctionTabButton:SetShown(hasFullAccess)
     frame.summaryTabButton:SetShown(hasFullAccess)
+    frame.spendTabButton:SetShown(hasFullAccess)
+    frame.lootTabButton:SetShown(hasFullAccess)
+    frame.damageTabButton:SetShown(hasFullAccess)
     frame.splitTabButton:SetShown(hasFullAccess)
+    frame.spendView:SetShown(hasFullAccess and frame.activeTab == "spend")
+    frame.lootView:SetShown(hasFullAccess and frame.activeTab == "loot")
+    frame.damageView:SetShown(hasFullAccess and frame.activeTab == "damage")
     frame.splitView:SetShown(hasFullAccess and frame.activeTab == "split")
     frame.tablesPanel:SetShown(isExpanded)
     frame.footerPanel:SetShown(hasFullAccess and isExpanded)
@@ -588,6 +934,8 @@ function addon:UpdateMainWindowLayout()
     frame.startButton:SetShown(hasFullAccess)
     frame.endButton:SetShown(hasFullAccess)
     frame.settingsActionButton:SetShown(hasFullAccess)
+    frame.modeLabel:SetShown(hasFullAccess)
+    frame.modeDropDown:SetShown(hasFullAccess)
 
     if hasFullAccess then
         frame:SetBackdropColor(0.02, 0.02, 0.04, 0.98)
@@ -635,21 +983,30 @@ function addon:UpdateMainWindowLayout()
 
             StaticPopup_Show("GOLDBID_RESET_CONFIRM")
         end)
+        if frame.mailPayoutButton then
+            frame.mailPayoutButton:SetSize(132, 22)
+            frame.mailPayoutButton:ClearAllPoints()
+            frame.mailPayoutButton:SetPoint("LEFT", frame.resetButton, "RIGHT", 10, 0)
+        end
         frame.itemButton:SetSize(50, 50)
         frame.itemButton:SetPoint("TOPLEFT", 54, -44)
         frame.itemText:Show()
         frame.itemText:SetPoint("TOP", frame.itemButton, "BOTTOM", 0, -8)
         frame.itemText:SetWidth(120)
         frame.itemText:SetJustifyH("CENTER")
+        frame.modeDropDown:ClearAllPoints()
+        frame.modeDropDown:SetPoint("RIGHT", frame.settingsButton, "LEFT", 8, -2)
+        frame.modeLabel:ClearAllPoints()
+        frame.modeLabel:SetPoint("RIGHT", frame.modeDropDown, "LEFT", 8, 0)
         frame.compactPotText:SetWidth(260)
         frame.minBidBox:SetWidth(90)
         frame.incrementBox:SetWidth(90)
         frame.durationBox:SetWidth(90)
         frame.bidBox:SetWidth(90)
-        frame.minBidBox:EnableMouse(true)
-        frame.incrementBox:EnableMouse(true)
+        frame.minBidBox:EnableMouse(not isRollMode)
+        frame.incrementBox:EnableMouse(not isRollMode)
         frame.durationBox:EnableMouse(true)
-        frame.bidBox:EnableMouse(true)
+        frame.bidBox:EnableMouse(not isRollMode)
         frame.bidButton:SetSize(96, 22)
         frame.passButton:Show()
         frame.passButton:SetSize(96, 22)
@@ -660,6 +1017,8 @@ function addon:UpdateMainWindowLayout()
         frame.footerText:Show()
         frame.compactCloseButton:ClearAllPoints()
         frame.compactCloseButton:SetPoint("TOPRIGHT", 2, 2)
+        frame.compactSkipButton:ClearAllPoints()
+        frame.compactSkipButton:SetPoint("RIGHT", frame.compactCloseButton, "LEFT", -4, 0)
         frame.minBidLabel:SetWidth(90)
         frame.incrementLabel:SetWidth(90)
         frame.durationLabel:SetWidth(90)
@@ -705,6 +1064,8 @@ function addon:UpdateMainWindowLayout()
         frame.controlsPanel:SetHeight(90)
         frame.compactCloseButton:ClearAllPoints()
         frame.compactCloseButton:SetPoint("BOTTOMRIGHT", frame.controlsPanel, "TOPRIGHT", 2, -2)
+        frame.compactSkipButton:ClearAllPoints()
+        frame.compactSkipButton:SetPoint("RIGHT", frame.compactCloseButton, "LEFT", -4, 0)
         frame.compactTabsBar:ClearAllPoints()
         frame.compactTabsBar:SetPoint("TOPLEFT", compactLeftButtonsLeft, compactButtonsTop - (compactButtonGapY * 2))
         frame.compactTabsBar:SetSize(compactButtonWidth, compactButtonHeight)
@@ -717,15 +1078,17 @@ function addon:UpdateMainWindowLayout()
         frame.itemButton:SetPoint("TOPLEFT", compactItemLeft, compactItemTop)
         frame.resetButton:Hide()
         frame.itemText:Hide()
+        frame.modeLabel:Hide()
+        frame.modeDropDown:Hide()
         -- Две колонки полей: слева Мин. ставка / Время, справа Шаг / Ваша ставка
         frame.minBidBox:SetWidth(60)
         frame.incrementBox:SetWidth(60)
         frame.durationBox:SetWidth(60)
         frame.bidBox:SetWidth(60)
         frame.minBidBox:EnableMouse(false)
-        frame.incrementBox:EnableMouse(true)
+        frame.incrementBox:EnableMouse(not isRollMode)
         frame.durationBox:EnableMouse(false)
-        frame.bidBox:EnableMouse(true)
+        frame.bidBox:EnableMouse(not isRollMode)
         frame.minBidLabel:SetWidth(60)
         frame.incrementLabel:SetWidth(60)
         frame.durationLabel:SetWidth(60)
@@ -751,8 +1114,10 @@ function addon:UpdateMainWindowLayout()
         frame.compactSummaryButton:Hide()
         -- Убрать дублирующийся текст пота
         frame.footerText:Hide()
-        frame.compactPotText:SetWidth(110)
+        frame.compactPotText:SetWidth(150)
     end
+
+    frame.addStepButton:SetShown(not isRollMode)
 end
 
 function addon:SetMainTab(tabName, preserveState)
@@ -760,7 +1125,7 @@ function addon:SetMainTab(tabName, preserveState)
     local activeTab = "auction"
     local hasFullAccess = self:HasFullInterfaceAccess()
 
-    if tabName == "summary" or (hasFullAccess and tabName == "split") then
+    if tabName == "summary" or (hasFullAccess and (tabName == "split" or tabName == "spend" or tabName == "loot" or tabName == "damage")) then
         activeTab = tabName
     end
 
@@ -786,12 +1151,27 @@ function addon:SetMainTab(tabName, preserveState)
         frame.summaryView:SetShown((hasFullAccess or frame.compactSectionOpen) and frame.activeTab == "summary")
     end
 
+    if frame.spendView then
+        frame.spendView:SetShown(hasFullAccess and frame.activeTab == "spend")
+    end
+
+    if frame.lootView then
+        frame.lootView:SetShown(hasFullAccess and frame.activeTab == "loot")
+    end
+
+    if frame.damageView then
+        frame.damageView:SetShown(hasFullAccess and frame.activeTab == "damage")
+    end
+
     if frame.splitView then
         frame.splitView:SetShown(hasFullAccess and frame.activeTab == "split")
     end
 
     setTabButtonState(frame.auctionTabButton, frame.activeTab == "auction")
     setTabButtonState(frame.summaryTabButton, frame.activeTab == "summary")
+    setTabButtonState(frame.spendTabButton, frame.activeTab == "spend")
+    setTabButtonState(frame.lootTabButton, frame.activeTab == "loot")
+    setTabButtonState(frame.damageTabButton, frame.activeTab == "damage")
     setTabButtonState(frame.splitTabButton, frame.activeTab == "split")
     setTabButtonState(frame.compactAuctionButton, frame.compactSectionOpen and frame.activeTab == "auction")
     setTabButtonState(frame.compactSummaryButton, frame.compactSectionOpen and frame.activeTab == "summary")
@@ -874,14 +1254,18 @@ function addon:HandleItemDrop()
 end
 
 function addon:CreateMainWindow()
-    local frame, header, itemButton, itemText, statusText, leaderText, closeButton, compactCloseButton, settingsButton
+    local frame, header, itemButton, itemText, statusText, leaderText, closeButton, compactCloseButton, compactSkipButton, settingsButton
     local controlsPanel, tablesPanel, footerPanel, infoBar
+    local modeLabel, modeDropDown
     local minBidBox, incrementBox, durationBox, bidBox, addStepButton
     local startButton, endButton, bidButton, passButton, syncButton, resetButton, splitMailButton
     local rows = {}
     local historyRows = {}
     local passRows = {}
     local summaryRows = {}
+    local spendingRows = {}
+    local lootRows = {}
+    local damageRows = {}
     local splitRows = {}
     local index
 
@@ -913,6 +1297,10 @@ function addon:CreateMainWindow()
     header.title:SetPoint("LEFT", 12, 0)
     header.title:SetText("GoldBid")
 
+    header.byline = header:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    header.byline:SetPoint("LEFT", header.title, "RIGHT", 6, -1)
+    header.byline:SetText("by monstrik")
+
     header.subtitle = header:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     header.subtitle:SetPoint("RIGHT", -34, 0)
     header.subtitle:SetText("GDKP аукцион")
@@ -930,6 +1318,15 @@ function addon:CreateMainWindow()
     settingsButton:SetScript("OnClick", function()
         addon:ShowExportWindow()
     end)
+
+    modeDropDown = CreateFrame("Frame", "GoldBidModeDropDown", header, "UIDropDownMenuTemplate")
+    modeDropDown:SetPoint("RIGHT", settingsButton, "LEFT", 8, -2)
+    UIDropDownMenu_SetWidth(modeDropDown, 100)
+    UIDropDownMenu_SetText(modeDropDown, "GoldBid")
+
+    modeLabel = header:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    modeLabel:SetPoint("RIGHT", modeDropDown, "LEFT", 8, 0)
+    modeLabel:SetText("Режим")
 
     controlsPanel = CreateFrame("Frame", nil, frame)
     controlsPanel:SetSize(736, 152)
@@ -962,6 +1359,24 @@ function addon:CreateMainWindow()
     end)
     compactCloseButton:Hide()
 
+    compactSkipButton = CreateFrame("Button", nil, controlsPanel, "UIPanelButtonTemplate")
+    compactSkipButton:SetSize(120, 20)
+    compactSkipButton:SetText("Пропустить лот")
+    compactSkipButton:SetFrameLevel(compactCloseButton:GetFrameLevel())
+    compactSkipButton:SetScript("OnClick", function()
+        addon:ConfirmSkipAuctionLot()
+    end)
+    compactSkipButton:SetScript("OnEnter", function(selfButton)
+        GameTooltip:SetOwner(selfButton, "ANCHOR_TOP")
+        GameTooltip:AddLine("Пропустить лот")
+        GameTooltip:AddLine("Скрывает окно текущего лота до появления следующего.", 0.9, 0.9, 0.9, true)
+        GameTooltip:Show()
+    end)
+    compactSkipButton:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    compactSkipButton:Hide()
+
     tablesPanel = CreateFrame("Frame", nil, frame)
     tablesPanel:SetPoint("TOPLEFT", 12, -222)
     tablesPanel:SetPoint("BOTTOMRIGHT", -12, 58)
@@ -983,9 +1398,33 @@ function addon:CreateMainWindow()
         addon:SetMainTab("summary")
     end)
 
+    frame.spendTabButton = CreateFrame("Button", nil, tablesPanel, "UIPanelButtonTemplate")
+    frame.spendTabButton:SetSize(84, 22)
+    frame.spendTabButton:SetPoint("LEFT", frame.summaryTabButton, "RIGHT", 8, 0)
+    frame.spendTabButton:SetText("Траты")
+    frame.spendTabButton:SetScript("OnClick", function()
+        addon:SetMainTab("spend")
+    end)
+
+    frame.lootTabButton = CreateFrame("Button", nil, tablesPanel, "UIPanelButtonTemplate")
+    frame.lootTabButton:SetSize(84, 22)
+    frame.lootTabButton:SetPoint("LEFT", frame.spendTabButton, "RIGHT", 8, 0)
+    frame.lootTabButton:SetText("Лут")
+    frame.lootTabButton:SetScript("OnClick", function()
+        addon:SetMainTab("loot")
+    end)
+
+    frame.damageTabButton = CreateFrame("Button", nil, tablesPanel, "UIPanelButtonTemplate")
+    frame.damageTabButton:SetSize(84, 22)
+    frame.damageTabButton:SetPoint("LEFT", frame.lootTabButton, "RIGHT", 8, 0)
+    frame.damageTabButton:SetText("Дамаг")
+    frame.damageTabButton:SetScript("OnClick", function()
+        addon:SetMainTab("damage")
+    end)
+
     frame.splitTabButton = CreateFrame("Button", nil, tablesPanel, "UIPanelButtonTemplate")
     frame.splitTabButton:SetSize(84, 22)
-    frame.splitTabButton:SetPoint("LEFT", frame.summaryTabButton, "RIGHT", 8, 0)
+    frame.splitTabButton:SetPoint("LEFT", frame.damageTabButton, "RIGHT", 8, 0)
     frame.splitTabButton:SetText("Делёжка")
     frame.splitTabButton:SetScript("OnClick", function()
         addon:SetMainTab("split")
@@ -998,6 +1437,18 @@ function addon:CreateMainWindow()
     frame.summaryView = CreateFrame("Frame", nil, tablesPanel)
     frame.summaryView:SetPoint("TOPLEFT", 12, -40)
     frame.summaryView:SetPoint("BOTTOMRIGHT", -12, 12)
+
+    frame.spendView = CreateFrame("Frame", nil, tablesPanel)
+    frame.spendView:SetPoint("TOPLEFT", 12, -40)
+    frame.spendView:SetPoint("BOTTOMRIGHT", -12, 12)
+
+    frame.lootView = CreateFrame("Frame", nil, tablesPanel)
+    frame.lootView:SetPoint("TOPLEFT", 12, -40)
+    frame.lootView:SetPoint("BOTTOMRIGHT", -12, 12)
+
+    frame.damageView = CreateFrame("Frame", nil, tablesPanel)
+    frame.damageView:SetPoint("TOPLEFT", 12, -40)
+    frame.damageView:SetPoint("BOTTOMRIGHT", -12, 12)
 
     frame.splitView = CreateFrame("Frame", nil, tablesPanel)
     frame.splitView:SetPoint("TOPLEFT", 12, -40)
@@ -1074,7 +1525,31 @@ function addon:CreateMainWindow()
 
     minBidBox = CreateFrame("EditBox", nil, controlsPanel)
     minBidBox:SetPoint("TOPLEFT", frame.minBidLabel, "BOTTOMLEFT", 0, -4)
-    setupInputBox(minBidBox, 90, "100")
+    setupInputBox(minBidBox, 90, formatGroupedInteger(addon:GetDefaultAuctionMinBid()))
+    minBidBox:SetNumeric(false)
+    minBidBox:SetScript("OnTextChanged", function(selfBox, userInput)
+        if userInput then
+            frame.minBidManualOverride = true
+            addon:ApplySuggestedRaiseStepForMinBid(frame, parseNumberText(selfBox:GetText()), false)
+        end
+    end)
+    minBidBox:SetScript("OnEnterPressed", function(selfBox)
+        local value = math.max(0, parseNumberText(selfBox:GetText()) or 0)
+
+        selfBox:SetText(formatGroupedInteger(value))
+        selfBox:ClearFocus()
+    end)
+    minBidBox:SetScript("OnEditFocusLost", function(selfBox)
+        local value = math.max(0, parseNumberText(selfBox:GetText()) or 0)
+
+        selfBox:SetText(formatGroupedInteger(value))
+    end)
+    minBidBox:SetScript("OnEscapePressed", function(selfBox)
+        local value = math.max(0, parseNumberText(selfBox:GetText()) or 0)
+
+        selfBox:SetText(formatGroupedInteger(value))
+        selfBox:ClearFocus()
+    end)
 
     frame.incrementLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     frame.incrementLabel:SetPoint("TOPLEFT", 346, -44)
@@ -1084,7 +1559,8 @@ function addon:CreateMainWindow()
 
     incrementBox = CreateFrame("EditBox", nil, controlsPanel)
     incrementBox:SetPoint("TOPLEFT", frame.incrementLabel, "BOTTOMLEFT", 0, -4)
-    setupInputBox(incrementBox, 90, "10")
+    setupInputBox(incrementBox, 90, formatGroupedInteger(addon:GetDefaultAuctionIncrement()))
+    incrementBox:SetNumeric(false)
     incrementBox:SetScript("OnTextChanged", function(selfBox, userInput)
         if userInput then
             frame.incrementManualOverride = true
@@ -1097,6 +1573,10 @@ function addon:CreateMainWindow()
     incrementBox:SetScript("OnEditFocusLost", function()
         addon:NormalizeClientRaiseStep()
     end)
+    incrementBox:SetScript("OnEscapePressed", function(selfBox)
+        addon:NormalizeClientRaiseStep()
+        selfBox:ClearFocus()
+    end)
 
     frame.durationLabel = controlsPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     frame.durationLabel:SetPoint("TOPLEFT", 236, -86)
@@ -1106,12 +1586,12 @@ function addon:CreateMainWindow()
 
     durationBox = CreateFrame("EditBox", nil, controlsPanel)
     durationBox:SetPoint("TOPLEFT", frame.durationLabel, "BOTTOMLEFT", 0, -4)
-    setupInputBox(durationBox, 90, "60")
+    setupInputBox(durationBox, 90, tostring(addon:GetDefaultAuctionDuration()))
     durationBox:SetScript("OnEnterPressed", function(selfBox)
         local value
 
         addon:EnsureAuctionState()
-        value = math.max(1, tonumber(selfBox:GetText()) or addon.currentAuction.duration or 60)
+        value = math.max(1, tonumber(selfBox:GetText()) or addon.currentAuction.duration or addon:GetDefaultAuctionDuration())
         addon.currentAuction.duration = value
         selfBox:SetText(tostring(value))
         selfBox:ClearFocus()
@@ -1120,13 +1600,13 @@ function addon:CreateMainWindow()
         local value
 
         addon:EnsureAuctionState()
-        value = math.max(1, tonumber(selfBox:GetText()) or addon.currentAuction.duration or 60)
+        value = math.max(1, tonumber(selfBox:GetText()) or addon.currentAuction.duration or addon:GetDefaultAuctionDuration())
         addon.currentAuction.duration = value
         selfBox:SetText(tostring(value))
     end)
     durationBox:SetScript("OnEscapePressed", function(selfBox)
         addon:EnsureAuctionState()
-        selfBox:SetText(tostring(addon.currentAuction.duration or 60))
+        selfBox:SetText(tostring(addon.currentAuction.duration or addon:GetDefaultAuctionDuration()))
         selfBox:ClearFocus()
     end)
 
@@ -1137,9 +1617,9 @@ function addon:CreateMainWindow()
     startButton:SetScript("OnClick", function()
         addon:ConfirmOrStartAuction(
             addon.pendingItemLink or addon.currentAuction.itemLink,
-            tonumber(minBidBox:GetText()) or 0,
-            tonumber(incrementBox:GetText()) or 0,
-            tonumber(durationBox:GetText()) or 60
+            parseNumberText(minBidBox:GetText()) or addon:GetDefaultAuctionMinBid(),
+            parseNumberText(incrementBox:GetText()) or addon:GetDefaultAuctionIncrement(),
+            tonumber(durationBox:GetText()) or addon:GetDefaultAuctionDuration()
         )
     end)
 
@@ -1161,7 +1641,19 @@ function addon:CreateMainWindow()
     bidBox:SetPoint("TOPLEFT", frame.bidLabel, "BOTTOMLEFT", 0, -4)
     setupInputBox(bidBox, 90, "0")
     bidBox:SetScript("OnTextChanged", function(selfBox, userInput)
+        local typedValue
+
         if userInput then
+            typedValue = tonumber(selfBox:GetText())
+
+            if addon:IsAuctionActive() and not addon:IsRollAuction() and typedValue then
+                frame.bidPreviewBase = addon:GetSuggestedBidBase()
+                frame.bidPreviewValue = typedValue
+            else
+                frame.bidPreviewBase = nil
+                frame.bidPreviewValue = nil
+            end
+
             frame.bidManualOverride = true
         end
     end)
@@ -1402,6 +1894,205 @@ function addon:CreateMainWindow()
     frame.summaryEmptyText:SetPoint("TOPLEFT", 12, -10)
     frame.summaryEmptyText:SetText("Продаж пока нет")
 
+    frame.spendStatsBar = CreateFrame("Frame", nil, frame.spendView)
+    frame.spendStatsBar:SetPoint("TOPLEFT", 0, 0)
+    frame.spendStatsBar:SetPoint("TOPRIGHT", 0, 0)
+    frame.spendStatsBar:SetHeight(28)
+    createBackdrop(frame.spendStatsBar, { 0.12, 0.03, 0.03, 0.88 }, { 0.45, 0.1, 0.1, 0.8 })
+
+    frame.spendTotalText = frame.spendStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.spendTotalText:SetPoint("LEFT", 10, 0)
+    frame.spendTotalText:SetWidth(220)
+    frame.spendTotalText:SetJustifyH("LEFT")
+    frame.spendTotalText:SetTextColor(0.95, 0.82, 0.28)
+
+    frame.spendBuyersText = frame.spendStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.spendBuyersText:SetPoint("CENTER", 0, 0)
+    frame.spendBuyersText:SetWidth(180)
+    frame.spendBuyersText:SetJustifyH("CENTER")
+    frame.spendBuyersText:SetTextColor(0.95, 0.82, 0.28)
+
+    frame.spendLotsText = frame.spendStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.spendLotsText:SetPoint("RIGHT", -10, 0)
+    frame.spendLotsText:SetWidth(220)
+    frame.spendLotsText:SetJustifyH("RIGHT")
+    frame.spendLotsText:SetTextColor(0.95, 0.82, 0.28)
+
+    frame.spendHeader = CreateFrame("Frame", nil, frame.spendView)
+    frame.spendHeader:SetPoint("TOPLEFT", frame.spendStatsBar, "BOTTOMLEFT", 0, -8)
+    frame.spendHeader:SetPoint("TOPRIGHT", frame.spendStatsBar, "BOTTOMRIGHT", 0, -8)
+    frame.spendHeader:SetHeight(24)
+    createBackdrop(frame.spendHeader, { 0.18, 0.03, 0.03, 0.95 }, { 0.55, 0.1, 0.1, 1 })
+
+    frame.spendHeader.index = frame.spendHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.spendHeader.index:SetPoint("LEFT", 12, 0)
+    frame.spendHeader.index:SetText("#")
+
+    frame.spendHeader.player = frame.spendHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.spendHeader.player:SetPoint("LEFT", 42, 0)
+    frame.spendHeader.player:SetText("Игрок")
+
+    frame.spendHeader.guild = frame.spendHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.spendHeader.guild:SetText("Гильдия")
+
+    frame.spendHeader.lots = frame.spendHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.spendHeader.lots:SetWidth(70)
+    frame.spendHeader.lots:SetJustifyH("CENTER")
+    frame.spendHeader.lots:SetText("Лотов")
+
+    frame.spendHeader.amount = frame.spendHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.spendHeader.amount:SetPoint("RIGHT", -18, 0)
+    frame.spendHeader.amount:SetText("Потратил")
+
+    frame.spendListPanel = CreateFrame("Frame", nil, frame.spendView)
+    frame.spendListPanel:SetPoint("TOPLEFT", frame.spendHeader, "BOTTOMLEFT", 0, -6)
+    frame.spendListPanel:SetPoint("BOTTOMRIGHT", 0, 0)
+    createBackdrop(frame.spendListPanel, { 0.05, 0.05, 0.08, 0.75 }, { 0.25, 0.08, 0.08, 0.8 })
+
+    frame.spendScrollFrame = CreateFrame("ScrollFrame", "GoldBidSpendScrollFrame", frame.spendListPanel, "UIPanelScrollFrameTemplate")
+    frame.spendScrollFrame:SetPoint("TOPLEFT", 4, -4)
+    frame.spendScrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
+
+    frame.spendContent = CreateFrame("Frame", nil, frame.spendScrollFrame)
+    frame.spendContent:SetWidth(620)
+    frame.spendContent:SetHeight(1)
+    frame.spendScrollFrame:SetScrollChild(frame.spendContent)
+
+    frame.spendEmptyText = frame.spendContent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    frame.spendEmptyText:SetPoint("TOPLEFT", 12, -10)
+    frame.spendEmptyText:SetText("Покупок пока нет")
+
+    frame.lootStatsBar = CreateFrame("Frame", nil, frame.lootView)
+    frame.lootStatsBar:SetPoint("TOPLEFT", 0, 0)
+    frame.lootStatsBar:SetPoint("TOPRIGHT", 0, 0)
+    frame.lootStatsBar:SetHeight(28)
+    createBackdrop(frame.lootStatsBar, { 0.12, 0.03, 0.03, 0.88 }, { 0.45, 0.1, 0.1, 0.8 })
+
+    frame.lootTotalText = frame.lootStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.lootTotalText:SetPoint("LEFT", 10, 0)
+    frame.lootTotalText:SetWidth(220)
+    frame.lootTotalText:SetJustifyH("LEFT")
+    frame.lootTotalText:SetTextColor(0.95, 0.82, 0.28)
+
+    frame.lootBossText = frame.lootStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.lootBossText:SetPoint("CENTER", 0, 0)
+    frame.lootBossText:SetWidth(180)
+    frame.lootBossText:SetJustifyH("CENTER")
+    frame.lootBossText:SetTextColor(0.95, 0.82, 0.28)
+
+    frame.lootUrgentText = frame.lootStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.lootUrgentText:SetPoint("RIGHT", -10, 0)
+    frame.lootUrgentText:SetWidth(220)
+    frame.lootUrgentText:SetJustifyH("RIGHT")
+    frame.lootUrgentText:SetTextColor(0.95, 0.82, 0.28)
+
+    frame.lootHeader = CreateFrame("Frame", nil, frame.lootView)
+    frame.lootHeader:SetPoint("TOPLEFT", frame.lootStatsBar, "BOTTOMLEFT", 0, -8)
+    frame.lootHeader:SetPoint("TOPRIGHT", frame.lootStatsBar, "BOTTOMRIGHT", 0, -8)
+    frame.lootHeader:SetHeight(24)
+    createBackdrop(frame.lootHeader, { 0.18, 0.03, 0.03, 0.95 }, { 0.55, 0.1, 0.1, 1 })
+
+    frame.lootHeader.item = frame.lootHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.lootHeader.item:SetPoint("LEFT", 40, 0)
+    frame.lootHeader.item:SetText("Лут")
+
+    frame.lootHeader.time = frame.lootHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.lootHeader.time:SetText("Осталось")
+
+    frame.lootHeader.action = frame.lootHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.lootHeader.action:SetText("В слот")
+
+    frame.lootListPanel = CreateFrame("Frame", nil, frame.lootView)
+    frame.lootListPanel:SetPoint("TOPLEFT", frame.lootHeader, "BOTTOMLEFT", 0, -6)
+    frame.lootListPanel:SetPoint("BOTTOMRIGHT", 0, 0)
+    createBackdrop(frame.lootListPanel, { 0.05, 0.05, 0.08, 0.75 }, { 0.25, 0.08, 0.08, 0.8 })
+
+    frame.lootScrollFrame = CreateFrame("ScrollFrame", "GoldBidLootScrollFrame", frame.lootListPanel, "UIPanelScrollFrameTemplate")
+    frame.lootScrollFrame:SetPoint("TOPLEFT", 4, -4)
+    frame.lootScrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
+
+    frame.lootContent = CreateFrame("Frame", nil, frame.lootScrollFrame)
+    frame.lootContent:SetWidth(620)
+    frame.lootContent:SetHeight(1)
+    frame.lootScrollFrame:SetScrollChild(frame.lootContent)
+
+    frame.lootEmptyText = frame.lootContent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    frame.lootEmptyText:SetPoint("TOPLEFT", 12, -10)
+    frame.lootEmptyText:SetText("Лут пока не отслежен")
+
+    frame.damageStatsBar = CreateFrame("Frame", nil, frame.damageView)
+    frame.damageStatsBar:SetPoint("TOPLEFT", 0, 0)
+    frame.damageStatsBar:SetPoint("TOPRIGHT", 0, 0)
+    frame.damageStatsBar:SetHeight(32)
+    createBackdrop(frame.damageStatsBar, { 0.12, 0.03, 0.03, 0.88 }, { 0.45, 0.1, 0.1, 0.8 })
+
+    frame.damageBossLabel = frame.damageStatsBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.damageBossLabel:SetPoint("LEFT", 10, 0)
+    frame.damageBossLabel:SetText("Босс")
+
+    frame.damageDropDown = CreateFrame("Frame", "GoldBidDamageDropDown", frame.damageStatsBar, "UIDropDownMenuTemplate")
+    frame.damageDropDown:SetPoint("LEFT", frame.damageBossLabel, "RIGHT", -6, -3)
+    UIDropDownMenu_SetWidth(frame.damageDropDown, 210)
+    UIDropDownMenu_SetText(frame.damageDropDown, "Выберите босса")
+
+    frame.damagePlayersText = frame.damageStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.damagePlayersText:SetWidth(90)
+    frame.damagePlayersText:SetJustifyH("RIGHT")
+    frame.damagePlayersText:SetTextColor(0.95, 0.82, 0.28)
+
+    frame.damageTimeText = frame.damageStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.damageTimeText:SetWidth(100)
+    frame.damageTimeText:SetJustifyH("RIGHT")
+    frame.damageTimeText:SetTextColor(0.95, 0.82, 0.28)
+
+    frame.damageTotalText = frame.damageStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.damageTotalText:SetWidth(160)
+    frame.damageTotalText:SetJustifyH("RIGHT")
+    frame.damageTotalText:SetTextColor(0.95, 0.82, 0.28)
+
+    frame.damageHeader = CreateFrame("Frame", nil, frame.damageView)
+    frame.damageHeader:SetPoint("TOPLEFT", frame.damageStatsBar, "BOTTOMLEFT", 0, -8)
+    frame.damageHeader:SetPoint("TOPRIGHT", frame.damageStatsBar, "BOTTOMRIGHT", 0, -8)
+    frame.damageHeader:SetHeight(24)
+    createBackdrop(frame.damageHeader, { 0.18, 0.03, 0.03, 0.95 }, { 0.55, 0.1, 0.1, 1 })
+
+    frame.damageHeader.index = frame.damageHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.damageHeader.index:SetPoint("LEFT", 12, 0)
+    frame.damageHeader.index:SetText("#")
+
+    frame.damageHeader.player = frame.damageHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.damageHeader.player:SetText("Игрок")
+
+    frame.damageHeader.class = frame.damageHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.damageHeader.class:SetText("Спек")
+
+    frame.damageHeader.amount = frame.damageHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.damageHeader.amount:SetText("Урон")
+
+    frame.damageHeader.dps = frame.damageHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.damageHeader.dps:SetText("DPS")
+
+    frame.damageHeader.percent = frame.damageHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.damageHeader.percent:SetText("%")
+
+    frame.damageListPanel = CreateFrame("Frame", nil, frame.damageView)
+    frame.damageListPanel:SetPoint("TOPLEFT", frame.damageHeader, "BOTTOMLEFT", 0, -6)
+    frame.damageListPanel:SetPoint("BOTTOMRIGHT", 0, 0)
+    createBackdrop(frame.damageListPanel, { 0.05, 0.05, 0.08, 0.75 }, { 0.25, 0.08, 0.08, 0.8 })
+
+    frame.damageScrollFrame = CreateFrame("ScrollFrame", "GoldBidDamageScrollFrame", frame.damageListPanel, "UIPanelScrollFrameTemplate")
+    frame.damageScrollFrame:SetPoint("TOPLEFT", 4, -4)
+    frame.damageScrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
+
+    frame.damageContent = CreateFrame("Frame", nil, frame.damageScrollFrame)
+    frame.damageContent:SetWidth(620)
+    frame.damageContent:SetHeight(1)
+    frame.damageScrollFrame:SetScrollChild(frame.damageContent)
+
+    frame.damageEmptyText = frame.damageContent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    frame.damageEmptyText:SetPoint("TOPLEFT", 12, -10)
+    frame.damageEmptyText:SetText("Вкладка требует аддон Details")
+
     frame.splitStatsBar = CreateFrame("Frame", nil, frame.splitView)
     frame.splitStatsBar:SetPoint("TOPLEFT", 0, 0)
     frame.splitStatsBar:SetPoint("TOPRIGHT", 0, 0)
@@ -1413,10 +2104,12 @@ function addon:CreateMainWindow()
     frame.splitGrossText:SetWidth(210)
     frame.splitGrossText:SetJustifyH("LEFT")
     frame.splitGrossText:SetTextColor(0.95, 0.82, 0.28)
+    frame.splitGrossText:Hide()
 
     frame.splitLeaderPercentLabel = frame.splitStatsBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     frame.splitLeaderPercentLabel:SetPoint("LEFT", 228, 0)
     frame.splitLeaderPercentLabel:SetText("Доля РЛ %")
+    frame.splitLeaderPercentLabel:Hide()
 
     frame.splitLeaderPercentBox = CreateFrame("EditBox", nil, frame.splitStatsBar)
     frame.splitLeaderPercentBox:SetPoint("LEFT", frame.splitLeaderPercentLabel, "RIGHT", 8, 0)
@@ -1431,39 +2124,21 @@ function addon:CreateMainWindow()
     frame.splitLeaderPercentBox:SetScript("OnEditFocusLost", function(selfBox)
         addon:SetLeaderSharePercent(selfBox:GetText())
     end)
+    frame.splitLeaderPercentBox:Hide()
 
     frame.splitLeaderShareText = frame.splitStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    frame.splitLeaderShareText:SetPoint("LEFT", frame.splitLeaderPercentBox, "RIGHT", 16, 0)
-    frame.splitLeaderShareText:SetWidth(150)
+    frame.splitLeaderShareText:SetPoint("LEFT", 10, 0)
+    frame.splitLeaderShareText:SetWidth(220)
     frame.splitLeaderShareText:SetJustifyH("LEFT")
     frame.splitLeaderShareText:SetTextColor(0.95, 0.82, 0.28)
+    frame.splitLeaderShareText:Hide()
 
     frame.splitBaseText = frame.splitStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     frame.splitBaseText:SetPoint("RIGHT", -10, 0)
     frame.splitBaseText:SetWidth(190)
     frame.splitBaseText:SetJustifyH("RIGHT")
     frame.splitBaseText:SetTextColor(0.95, 0.82, 0.28)
-
-    splitMailButton = CreateFrame("Button", nil, frame.splitStatsBar, "UIPanelButtonTemplate")
-    splitMailButton:SetSize(132, 22)
-    splitMailButton:SetPoint("RIGHT", -10, 0)
-    splitMailButton:SetText("Раздать почтой")
-    splitMailButton:SetScript("OnClick", function()
-        addon:StartMailPayout(false)
-    end)
-    splitMailButton:SetScript("OnEnter", function(selfButton)
-        GameTooltip:SetOwner(selfButton, "ANCHOR_TOP")
-        GameTooltip:AddLine("Почтовая раздача")
-        GameTooltip:AddLine("Автозаполняет получателя и сумму", 0.9, 0.9, 0.9)
-        GameTooltip:AddLine("После отправки письма готовит следующего", 0.9, 0.9, 0.9)
-        GameTooltip:Show()
-    end)
-    splitMailButton:SetScript("OnLeave", function()
-        GameTooltip:Hide()
-    end)
-
-    frame.splitBaseText:ClearAllPoints()
-    frame.splitBaseText:SetPoint("RIGHT", splitMailButton, "LEFT", -8, 0)
+    frame.splitBaseText:Hide()
 
     frame.splitHeader = CreateFrame("Frame", nil, frame.splitView)
     frame.splitHeader:SetPoint("TOPLEFT", frame.splitStatsBar, "BOTTOMLEFT", 0, -8)
@@ -1476,36 +2151,43 @@ function addon:CreateMainWindow()
     frame.splitHeader.index:SetWidth(18)
     frame.splitHeader.index:SetJustifyH("CENTER")
     frame.splitHeader.index:SetText("#")
+    frame.splitHeader.index:Hide()
 
     frame.splitHeader.player = frame.splitHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    frame.splitHeader.player:SetPoint("LEFT", 34, 0)
-    frame.splitHeader.player:SetWidth(108)
+    frame.splitHeader.player:SetPoint("LEFT", 8, 0)
+    frame.splitHeader.player:SetWidth(118)
     frame.splitHeader.player:SetJustifyH("CENTER")
     frame.splitHeader.player:SetText("Игрок")
 
     frame.splitHeader.spec = frame.splitHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    frame.splitHeader.spec:SetPoint("LEFT", 150, 0)
+    frame.splitHeader.spec:SetPoint("LEFT", 130, 0)
     frame.splitHeader.spec:SetWidth(72)
     frame.splitHeader.spec:SetJustifyH("CENTER")
     frame.splitHeader.spec:SetText("Спек")
 
     frame.splitHeader.role = frame.splitHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    frame.splitHeader.role:SetPoint("LEFT", 232, 0)
+    frame.splitHeader.role:SetPoint("LEFT", 208, 0)
     frame.splitHeader.role:SetWidth(54)
     frame.splitHeader.role:SetJustifyH("CENTER")
     frame.splitHeader.role:SetText("Роль")
 
     frame.splitHeader.percent = frame.splitHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    frame.splitHeader.percent:SetPoint("LEFT", 296, 0)
+    frame.splitHeader.percent:SetPoint("LEFT", 268, 0)
     frame.splitHeader.percent:SetWidth(50)
     frame.splitHeader.percent:SetJustifyH("CENTER")
     frame.splitHeader.percent:SetText("%")
 
-    frame.splitHeader.note = frame.splitHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    frame.splitHeader.note:SetPoint("LEFT", 350, 0)
-    frame.splitHeader.note:SetWidth(150)
-    frame.splitHeader.note:SetJustifyH("CENTER")
-    frame.splitHeader.note:SetText("Косяки / плюсики")
+    frame.splitHeader.penaltyNote = frame.splitHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.splitHeader.penaltyNote:SetPoint("LEFT", 320, 0)
+    frame.splitHeader.penaltyNote:SetWidth(70)
+    frame.splitHeader.penaltyNote:SetJustifyH("CENTER")
+    frame.splitHeader.penaltyNote:SetText("Косяки")
+
+    frame.splitHeader.bonusNote = frame.splitHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.splitHeader.bonusNote:SetPoint("LEFT", 398, 0)
+    frame.splitHeader.bonusNote:SetWidth(70)
+    frame.splitHeader.bonusNote:SetJustifyH("CENTER")
+    frame.splitHeader.bonusNote:SetText("Плюсики")
 
     frame.splitHeader.debt = frame.splitHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     frame.splitHeader.debt:SetPoint("LEFT", 520, 0)
@@ -1550,6 +2232,24 @@ function addon:CreateMainWindow()
         StaticPopup_Show("GOLDBID_RESET_CONFIRM")
     end)
 
+    splitMailButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    splitMailButton:SetSize(132, 22)
+    splitMailButton:SetPoint("LEFT", resetButton, "RIGHT", 10, 0)
+    splitMailButton:SetText("Раздать почтой")
+    splitMailButton:SetScript("OnClick", function()
+        addon:StartMailPayout(false)
+    end)
+    splitMailButton:SetScript("OnEnter", function(selfButton)
+        GameTooltip:SetOwner(selfButton, "ANCHOR_TOP")
+        GameTooltip:AddLine("Почтовая раздача")
+        GameTooltip:AddLine("Автозаполняет получателя и сумму", 0.9, 0.9, 0.9)
+        GameTooltip:AddLine("После отправки письма готовит следующего", 0.9, 0.9, 0.9)
+        GameTooltip:Show()
+    end)
+    splitMailButton:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+
     frame.footerText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     frame.footerText:SetPoint("RIGHT", footerPanel, "RIGHT", -12, 0)
     frame.footerText:SetJustifyH("RIGHT")
@@ -1558,6 +2258,7 @@ function addon:CreateMainWindow()
     frame.header = header
     frame.closeButton = closeButton
     frame.compactCloseButton = compactCloseButton
+    frame.compactSkipButton = compactSkipButton
     frame.settingsButton = settingsButton
     frame.leaderText = leaderText
     frame.statusText = statusText
@@ -1572,6 +2273,8 @@ function addon:CreateMainWindow()
     frame.durationBox = durationBox
     frame.bidBox = bidBox
     frame.addStepButton = addStepButton
+    frame.modeLabel = modeLabel
+    frame.modeDropDown = modeDropDown
     frame.startButton = startButton
     frame.endButton = endButton
     frame.bidButton = bidButton
@@ -1585,6 +2288,9 @@ function addon:CreateMainWindow()
     frame.passRows = passRows
     frame.historyRows = historyRows
     frame.summaryRows = summaryRows
+    frame.spendingRows = spendingRows
+    frame.lootRows = lootRows
+    frame.damageRows = damageRows
     frame.splitRows = splitRows
 
     self.frame = frame
@@ -1592,8 +2298,12 @@ function addon:CreateMainWindow()
     return frame
 end
 
-function addon:ShowMainWindow()
+function addon:ShowMainWindow(force)
     local frame = self:CreateMainWindow()
+
+    if not force and not frame:IsShown() and not self:HasFullInterfaceAccess() and self:IsAuctionWindowSuppressed() then
+        return frame
+    end
 
     if not frame:IsShown() then
         if self:HasFullInterfaceAccess() then
@@ -1618,25 +2328,30 @@ function addon:RefreshSplitView(frame)
     local contentWidth = math.max(648, math.floor(((frame.splitListPanel and frame.splitListPanel:GetWidth()) or 684) - 36))
     local indexLeft = 10
     local indexWidth = 18
-    local playerLeft = 34
-    local playerWidth = 108
-    local specLeft = 148
-    local specWidth = 72
-    local roleLeft = 230
-    local roleWidth = 54
-    local percentLeft = 294
+    local playerLeft = 8
+    local playerWidth = 104
+    local specLeft = 118
+    local specWidth = 66
+    local roleLeft = 190
+    local roleWidth = 46
+    local percentLeft = 242
     local percentWidth = 50
-    local noteLeft = 348
     local debtWidth = 60
-    local netWidth = 76
-    local toggleWidth = 36
+    local netWidth = 60
+    local sentWidth = 24
+    local toggleWidth = 34
     local presetWidth = 20
-    local debtLeft = contentWidth - netWidth - 18 - 8 - debtWidth
+    local sentLeft = contentWidth - sentWidth - 18
+    local netLeft = sentLeft - 8 - netWidth
+    local debtLeft = netLeft - 8 - debtWidth
     local toggleLeft = debtLeft - 8 - toggleWidth
-    local penaltyLeft = toggleLeft - 2 - presetWidth
-    local bonusLeft = penaltyLeft - 2 - presetWidth
-    local noteWidth = math.max(100, bonusLeft - noteLeft - 6)
-    local netLeft = contentWidth - netWidth - 18
+    local notesStartLeft = percentLeft + percentWidth + 8
+    local noteAreaWidth = math.max(90, toggleLeft - notesStartLeft - 8)
+    local noteColumnWidth = math.max(40, math.floor((noteAreaWidth - presetWidth * 2 - 10) / 2))
+    local penaltyNoteLeft = notesStartLeft
+    local penaltyButtonLeft = penaltyNoteLeft + noteColumnWidth + 2
+    local bonusNoteLeft = penaltyButtonLeft + presetWidth + 6
+    local bonusButtonLeft = bonusNoteLeft + noteColumnWidth + 2
     local rowCount
     local insertedSubstitutesHeader = false
     local index
@@ -1659,17 +2374,19 @@ function addon:RefreshSplitView(frame)
     frame.splitContent:SetWidth(contentWidth)
 
     if not frame.splitLeaderPercentBox:HasFocus() then
-        frame.splitLeaderPercentBox:SetText(tostring(split.leaderSharePercent or 20))
+        frame.splitLeaderPercentBox:SetText("0")
     end
 
-    frame.splitLeaderPercentBox:EnableMouse(canEdit)
-    frame.splitGrossText:SetText("Банк: " .. formatGold(split.totalPot or 0) .. " | Основа: " .. tostring(split.mainCount or 0))
-    frame.splitLeaderShareText:SetText("РЛ: " .. formatGold(split.leaderShareAmount or 0))
-    frame.splitBaseText:SetText("Замены: " .. tostring(split.substituteCount or 0) .. " | 100% = " .. formatGold(split.baseShare or 0))
+    frame.splitLeaderPercentBox:EnableMouse(false)
+    frame.splitLeaderPercentLabel:Hide()
+    frame.splitLeaderPercentBox:Hide()
+    frame.splitGrossText:SetText("")
+    frame.splitLeaderShareText:SetText("")
+    frame.splitBaseText:SetText("")
     frame.splitEmptyText:SetShown(rowCount == 0)
 
     if frame.mailPayoutButton then
-        frame.mailPayoutButton:SetShown(canEdit)
+        frame.mailPayoutButton:SetShown(canEdit and frame.activeTab == "split")
         frame.mailPayoutButton:SetEnabled(canEdit)
         frame.mailPayoutButton:SetText(self:GetMailPayoutButtonText())
     end
@@ -1678,6 +2395,7 @@ function addon:RefreshSplitView(frame)
     frame.splitHeader.index:SetPoint("LEFT", indexLeft, 0)
     frame.splitHeader.index:SetWidth(indexWidth)
     frame.splitHeader.index:SetJustifyH("CENTER")
+    frame.splitHeader.index:Hide()
 
     frame.splitHeader.player:ClearAllPoints()
     frame.splitHeader.player:SetPoint("LEFT", playerLeft, 0)
@@ -1699,10 +2417,15 @@ function addon:RefreshSplitView(frame)
     frame.splitHeader.percent:SetWidth(percentWidth)
     frame.splitHeader.percent:SetJustifyH("CENTER")
 
-    frame.splitHeader.note:ClearAllPoints()
-    frame.splitHeader.note:SetPoint("LEFT", noteLeft, 0)
-    frame.splitHeader.note:SetWidth(noteWidth)
-    frame.splitHeader.note:SetJustifyH("CENTER")
+    frame.splitHeader.penaltyNote:ClearAllPoints()
+    frame.splitHeader.penaltyNote:SetPoint("LEFT", penaltyNoteLeft, 0)
+    frame.splitHeader.penaltyNote:SetWidth(noteColumnWidth)
+    frame.splitHeader.penaltyNote:SetJustifyH("CENTER")
+
+    frame.splitHeader.bonusNote:ClearAllPoints()
+    frame.splitHeader.bonusNote:SetPoint("LEFT", bonusNoteLeft, 0)
+    frame.splitHeader.bonusNote:SetWidth(noteColumnWidth)
+    frame.splitHeader.bonusNote:SetJustifyH("CENTER")
 
     frame.splitHeader.debt:ClearAllPoints()
     frame.splitHeader.debt:SetPoint("LEFT", debtLeft, 0)
@@ -1713,6 +2436,16 @@ function addon:RefreshSplitView(frame)
     frame.splitHeader.net:SetPoint("LEFT", netLeft, 0)
     frame.splitHeader.net:SetWidth(netWidth)
     frame.splitHeader.net:SetJustifyH("CENTER")
+
+    if not frame.splitHeader.sent then
+        frame.splitHeader.sent = frame.splitHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        frame.splitHeader.sent:SetText("OK")
+    end
+
+    frame.splitHeader.sent:ClearAllPoints()
+    frame.splitHeader.sent:SetPoint("LEFT", sentLeft, 0)
+    frame.splitHeader.sent:SetWidth(sentWidth)
+    frame.splitHeader.sent:SetJustifyH("CENTER")
 
     for index = 1, rowCount do
         local data = rows[index]
@@ -1733,6 +2466,7 @@ function addon:RefreshSplitView(frame)
             row.index:SetPoint("LEFT", indexLeft, 0)
             row.index:SetWidth(indexWidth)
             row.index:SetJustifyH("CENTER")
+            row.index:Hide()
 
             row.name = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
             row.name:SetPoint("LEFT", playerLeft, 0)
@@ -1774,26 +2508,25 @@ function addon:RefreshSplitView(frame)
                 addon:UpdateSplitEntryField(row.playerName, "percent", selfBox:GetText())
             end)
 
-            row.noteBox = CreateFrame("EditBox", nil, row)
-            row.noteBox:SetPoint("LEFT", noteLeft, 0)
-            setupTextBox(row.noteBox, noteWidth, "")
-            row.noteBox:SetJustifyH("CENTER")
-            row.noteBox:SetScript("OnEnterPressed", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "note", selfBox:GetText())
+            row.penaltyNoteBox = CreateFrame("EditBox", nil, row)
+            row.penaltyNoteBox:SetPoint("LEFT", penaltyNoteLeft, 0)
+            setupTextBox(row.penaltyNoteBox, noteColumnWidth, "")
+            row.penaltyNoteBox:SetJustifyH("LEFT")
+            row.penaltyNoteBox:SetScript("OnEnterPressed", function(selfBox)
+                addon:UpdateSplitEntryField(row.playerName, "penaltyNote", selfBox:GetText())
                 selfBox:ClearFocus()
             end)
-            row.noteBox:SetScript("OnEscapePressed", function(selfBox)
+            row.penaltyNoteBox:SetScript("OnEscapePressed", function(selfBox)
                 selfBox:ClearFocus()
+                if selfBox.SetCursorPosition then
+                    selfBox:SetCursorPosition(0)
+                end
             end)
-            row.noteBox:SetScript("OnEditFocusLost", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "note", selfBox:GetText())
-            end)
-
-            row.bonusButton = CreateFrame("Button", nil, row)
-            setupMiniActionButton(row.bonusButton, 20, 18, "+")
-            row.bonusButton:SetFrameLevel(row:GetFrameLevel() + 4)
-            row.bonusButton:SetScript("OnClick", function()
-                addon:ApplySplitPreset(row.playerName, "bonus")
+            row.penaltyNoteBox:SetScript("OnEditFocusLost", function(selfBox)
+                addon:UpdateSplitEntryField(row.playerName, "penaltyNote", selfBox:GetText())
+                if selfBox.SetCursorPosition then
+                    selfBox:SetCursorPosition(0)
+                end
             end)
 
             row.penaltyButton = CreateFrame("Button", nil, row)
@@ -1801,6 +2534,34 @@ function addon:RefreshSplitView(frame)
             row.penaltyButton:SetFrameLevel(row:GetFrameLevel() + 4)
             row.penaltyButton:SetScript("OnClick", function()
                 addon:ApplySplitPreset(row.playerName, "penalty")
+            end)
+
+            row.bonusNoteBox = CreateFrame("EditBox", nil, row)
+            row.bonusNoteBox:SetPoint("LEFT", bonusNoteLeft, 0)
+            setupTextBox(row.bonusNoteBox, noteColumnWidth, "")
+            row.bonusNoteBox:SetJustifyH("LEFT")
+            row.bonusNoteBox:SetScript("OnEnterPressed", function(selfBox)
+                addon:UpdateSplitEntryField(row.playerName, "bonusNote", selfBox:GetText())
+                selfBox:ClearFocus()
+            end)
+            row.bonusNoteBox:SetScript("OnEscapePressed", function(selfBox)
+                selfBox:ClearFocus()
+                if selfBox.SetCursorPosition then
+                    selfBox:SetCursorPosition(0)
+                end
+            end)
+            row.bonusNoteBox:SetScript("OnEditFocusLost", function(selfBox)
+                addon:UpdateSplitEntryField(row.playerName, "bonusNote", selfBox:GetText())
+                if selfBox.SetCursorPosition then
+                    selfBox:SetCursorPosition(0)
+                end
+            end)
+
+            row.bonusButton = CreateFrame("Button", nil, row)
+            setupMiniActionButton(row.bonusButton, 20, 18, "+")
+            row.bonusButton:SetFrameLevel(row:GetFrameLevel() + 4)
+            row.bonusButton:SetScript("OnClick", function()
+                addon:ApplySplitPreset(row.playerName, "bonus")
             end)
 
             row.modeButton = CreateFrame("Button", nil, row)
@@ -1829,6 +2590,23 @@ function addon:RefreshSplitView(frame)
             row.net:SetWidth(netWidth)
             row.net:SetJustifyH("CENTER")
 
+            row.sentCheck = CreateFrame("CheckButton", nil, row, "UICheckButtonTemplate")
+            row.sentCheck:SetSize(18, 18)
+            row.sentCheck:EnableMouse(false)
+            if row.sentCheck.SetDisabledCheckedTexture then
+                row.sentCheck:SetDisabledCheckedTexture("Interface\\Buttons\\UI-CheckBox-Check")
+            end
+
+            local sentTexture = nil
+
+            if row.sentCheck.GetCheckedTexture then
+                sentTexture = row.sentCheck:GetCheckedTexture()
+            end
+
+            if sentTexture and sentTexture.SetVertexColor then
+                sentTexture:SetVertexColor(0.15, 1, 0.15)
+            end
+
             frame.splitRows[index] = row
         end
 
@@ -1851,13 +2629,16 @@ function addon:RefreshSplitView(frame)
         row.percentBox:ClearAllPoints()
         row.percentBox:SetPoint("LEFT", percentLeft, 0)
         row.percentBox:SetWidth(percentWidth)
-        row.noteBox:ClearAllPoints()
-        row.noteBox:SetPoint("LEFT", noteLeft, 0)
-        row.noteBox:SetWidth(noteWidth)
-        row.bonusButton:ClearAllPoints()
-        row.bonusButton:SetPoint("LEFT", bonusLeft, 0)
+        row.penaltyNoteBox:ClearAllPoints()
+        row.penaltyNoteBox:SetPoint("LEFT", penaltyNoteLeft, 0)
+        row.penaltyNoteBox:SetWidth(noteColumnWidth)
         row.penaltyButton:ClearAllPoints()
-        row.penaltyButton:SetPoint("LEFT", penaltyLeft, 0)
+        row.penaltyButton:SetPoint("LEFT", penaltyButtonLeft, 0)
+        row.bonusNoteBox:ClearAllPoints()
+        row.bonusNoteBox:SetPoint("LEFT", bonusNoteLeft, 0)
+        row.bonusNoteBox:SetWidth(noteColumnWidth)
+        row.bonusButton:ClearAllPoints()
+        row.bonusButton:SetPoint("LEFT", bonusButtonLeft, 0)
         row.modeButton:ClearAllPoints()
         row.modeButton:SetPoint("LEFT", toggleLeft, 0)
         row.debtBox:ClearAllPoints()
@@ -1866,6 +2647,8 @@ function addon:RefreshSplitView(frame)
         row.net:ClearAllPoints()
         row.net:SetPoint("LEFT", netLeft, 0)
         row.net:SetWidth(netWidth)
+        row.sentCheck:ClearAllPoints()
+        row.sentCheck:SetPoint("LEFT", sentLeft - 2, -1)
 
         if data.separator then
             row:SetBackdropColor(0.13, 0.05, 0.05, 0.92)
@@ -1877,34 +2660,37 @@ function addon:RefreshSplitView(frame)
             row.spec:Hide()
             row.roleBox:Hide()
             row.percentBox:Hide()
-            row.noteBox:Hide()
-            row.bonusButton:Hide()
+            row.penaltyNoteBox:Hide()
             row.penaltyButton:Hide()
+            row.bonusNoteBox:Hide()
+            row.bonusButton:Hide()
             row.modeButton:Hide()
             row.debtBox:Hide()
             row.net:Hide()
+            row.sentCheck:Hide()
             row:Show()
         else
             row:SetBackdropColor(0.08, 0.08, 0.08, 0.8)
             row:SetBackdropBorderColor(0.25, 0.08, 0.08, 0.8)
             row.separatorLabel:Hide()
-            row.index:Show()
+            row.index:Hide()
             row.name:Show()
             row.spec:Show()
             row.roleBox:Show()
             row.percentBox:Show()
-            row.noteBox:Show()
-            row.bonusButton:Show()
+            row.penaltyNoteBox:Show()
             row.penaltyButton:Show()
+            row.bonusNoteBox:Show()
+            row.bonusButton:Show()
             row.modeButton:Show()
             row.debtBox:Show()
             row.net:Show()
+            row.sentCheck:Show()
         end
 
         if not data.separator then
             row.playerName = data.name
             row.isSubstitute = data.isSubstitute
-            row.index:SetText(data.index or "")
             row.name:SetText(data.name)
             row.spec:SetText(data.spec ~= "" and tostring(data.spec) or "...")
 
@@ -1916,8 +2702,18 @@ function addon:RefreshSplitView(frame)
                 row.percentBox:SetText(tostring(data.percent or 0))
             end
 
-            if not row.noteBox:HasFocus() then
-                row.noteBox:SetText(tostring(data.note or ""))
+            if not row.penaltyNoteBox:HasFocus() then
+                row.penaltyNoteBox:SetText(tostring(data.penaltyNote or ""))
+                if row.penaltyNoteBox.SetCursorPosition then
+                    row.penaltyNoteBox:SetCursorPosition(0)
+                end
+            end
+
+            if not row.bonusNoteBox:HasFocus() then
+                row.bonusNoteBox:SetText(tostring(data.bonusNote or ""))
+                if row.bonusNoteBox.SetCursorPosition then
+                    row.bonusNoteBox:SetCursorPosition(0)
+                end
             end
 
             if not row.debtBox:HasFocus() then
@@ -1926,13 +2722,15 @@ function addon:RefreshSplitView(frame)
 
             row.roleBox:EnableMouse(canEdit)
             row.percentBox:EnableMouse(canEdit)
-            row.noteBox:EnableMouse(canEdit)
-            row.bonusButton:SetEnabled(canEdit)
+            row.penaltyNoteBox:EnableMouse(canEdit)
             row.penaltyButton:SetEnabled(canEdit)
+            row.bonusNoteBox:EnableMouse(canEdit)
+            row.bonusButton:SetEnabled(canEdit)
             row.modeButton:SetEnabled(canEdit)
             row.debtBox:EnableMouse(canEdit)
             row.modeButton:SetText(data.isSubstitute and "Осн" or "Зам")
             row.net:SetText(formatGold(data.net or 0))
+            row.sentCheck:SetChecked(data.sent and true or false)
 
             if (data.net or 0) < 0 then
                 row.net:SetTextColor(1, 0.35, 0.35)
@@ -1951,21 +2749,585 @@ function addon:RefreshSplitView(frame)
     frame.splitContent:SetHeight(math.max(rowCount * 24, 28))
 end
 
+function addon:CommitSplitViewEdits()
+    local frame = self.frame
+    local index
+
+    if not frame or not frame.splitRows then
+        return
+    end
+
+    for index = 1, table.getn(frame.splitRows) do
+        local row = frame.splitRows[index]
+
+        if row and row.playerName and row:IsShown() and not row.separator then
+            self:UpdateSplitEntryField(row.playerName, "role", row.roleBox and row.roleBox:GetText() or "", true)
+            self:UpdateSplitEntryField(row.playerName, "percent", row.percentBox and row.percentBox:GetText() or "", true)
+            self:UpdateSplitEntryField(row.playerName, "penaltyNote", row.penaltyNoteBox and row.penaltyNoteBox:GetText() or "", true)
+            self:UpdateSplitEntryField(row.playerName, "bonusNote", row.bonusNoteBox and row.bonusNoteBox:GetText() or "", true)
+            self:UpdateSplitEntryField(row.playerName, "debt", row.debtBox and row.debtBox:GetText() or "", true)
+        end
+    end
+
+    if self.RefreshMainWindow then
+        self:RefreshMainWindow()
+    end
+end
+
+function addon:RefreshSpendingView(frame, spending)
+    local data = spending or self:BuildSpendingSummary()
+    local rows = data and data.rows or {}
+    local rowCount = table.getn(rows)
+    local contentWidth = math.max(620, math.floor(((frame.spendListPanel and frame.spendListPanel:GetWidth()) or 656) - 36))
+    local guildWidth = 160
+    local lotsWidth = 70
+    local amountWidth = 96
+    local amountLeft = contentWidth - amountWidth - 18
+    local lotsLeft = amountLeft - 18 - lotsWidth
+    local guildLeft = lotsLeft - 12 - guildWidth
+    local playerWidth = math.max(120, guildLeft - 50)
+    local index
+
+    frame.spendContent:SetWidth(contentWidth)
+    frame.spendTotalText:SetText("Потрачено всего: " .. formatGold(data.totalSpent or 0))
+    frame.spendBuyersText:SetText("Покупателей: " .. tostring(data.buyerCount or 0))
+    frame.spendLotsText:SetText("Лотов: " .. tostring(data.totalLots or 0))
+    frame.spendEmptyText:SetShown(rowCount == 0)
+
+    frame.spendHeader.player:ClearAllPoints()
+    frame.spendHeader.player:SetPoint("LEFT", 42, 0)
+    frame.spendHeader.player:SetWidth(playerWidth)
+    frame.spendHeader.player:SetJustifyH("LEFT")
+
+    frame.spendHeader.guild:ClearAllPoints()
+    frame.spendHeader.guild:SetPoint("LEFT", guildLeft, 0)
+    frame.spendHeader.guild:SetWidth(guildWidth)
+    frame.spendHeader.guild:SetJustifyH("LEFT")
+
+    frame.spendHeader.lots:ClearAllPoints()
+    frame.spendHeader.lots:SetPoint("LEFT", lotsLeft, 0)
+
+    frame.spendHeader.amount:ClearAllPoints()
+    frame.spendHeader.amount:SetPoint("LEFT", amountLeft, 0)
+    frame.spendHeader.amount:SetWidth(amountWidth)
+    frame.spendHeader.amount:SetJustifyH("RIGHT")
+
+    for index = 1, rowCount do
+        local rowData = rows[index]
+        local row = frame.spendingRows[index]
+
+        if not row then
+            row = CreateFrame("Frame", nil, frame.spendContent)
+            createBackdrop(row, { 0.08, 0.08, 0.08, 0.8 }, { 0.25, 0.08, 0.08, 0.8 })
+
+            row.index = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            row.index:SetPoint("LEFT", 12, 0)
+            row.index:SetWidth(20)
+            row.index:SetJustifyH("LEFT")
+
+            row.player = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            row.player:SetPoint("LEFT", 42, 0)
+            row.player:SetJustifyH("LEFT")
+
+            row.guild = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            row.guild:SetJustifyH("LEFT")
+            row.guild:SetTextColor(0.95, 0.82, 0.28)
+
+            row.lots = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            row.lots:SetWidth(lotsWidth)
+            row.lots:SetJustifyH("CENTER")
+
+            row.amount = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            row.amount:SetWidth(amountWidth)
+            row.amount:SetJustifyH("RIGHT")
+
+            frame.spendingRows[index] = row
+        end
+
+        row:SetSize(contentWidth, 22)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -((index - 1) * 24))
+        row.player:SetWidth(playerWidth)
+        row.guild:ClearAllPoints()
+        row.guild:SetPoint("LEFT", guildLeft, 0)
+        row.guild:SetWidth(guildWidth)
+        row.lots:ClearAllPoints()
+        row.lots:SetPoint("LEFT", lotsLeft, 0)
+        row.amount:ClearAllPoints()
+        row.amount:SetPoint("LEFT", amountLeft, 0)
+
+        row.index:SetText(index)
+        row.player:SetText(tostring(rowData.name or "-"))
+        row.guild:SetText((rowData.guildName and rowData.guildName ~= "") and tostring(rowData.guildName) or "-")
+        row.lots:SetText(tostring(rowData.lots or 0))
+        row.amount:SetText(formatGold(rowData.total or 0))
+        row:Show()
+    end
+
+    for index = rowCount + 1, table.getn(frame.spendingRows) do
+        frame.spendingRows[index]:Hide()
+    end
+
+    frame.spendContent:SetHeight(math.max(rowCount * 24, 28))
+end
+
+function addon:RefreshLootView(frame, lootSummary)
+    local data = lootSummary or self:BuildLootSummary()
+    local rows = data and data.rows or {}
+    local rowCount = table.getn(rows)
+    local contentWidth = math.max(620, math.floor(((frame.lootListPanel and frame.lootListPanel:GetWidth()) or 656) - 36))
+    local iconLeft = 8
+    local iconSize = 18
+    local actionWidth = 56
+    local timeWidth = 92
+    local actionLeft = contentWidth - actionWidth - 18
+    local timeLeftPos = actionLeft - 12 - timeWidth
+    local itemLeft = iconLeft + iconSize + 10
+    local itemWidth = math.max(180, timeLeftPos - itemLeft - 12)
+    local canSelectAny = self:IsPlayerController() and not self:IsAuctionActive()
+    local selectedItemIdentity = getItemIdentity(self.pendingItemLink or (self.currentAuction and self.currentAuction.itemLink))
+    local index
+
+    frame.lootContent:SetWidth(contentWidth)
+    frame.lootTotalText:SetText("Предметов: " .. tostring(data.totalCount or 0))
+    frame.lootBossText:SetText("Боссов: " .. tostring(data.bossCount or 0))
+    frame.lootUrgentText:SetText("Срочно: " .. tostring(data.urgentCount or 0))
+    frame.lootEmptyText:SetShown(rowCount == 0)
+
+    frame.lootHeader.item:ClearAllPoints()
+    frame.lootHeader.item:SetPoint("LEFT", itemLeft, 0)
+    frame.lootHeader.item:SetWidth(itemWidth)
+    frame.lootHeader.item:SetJustifyH("LEFT")
+
+    frame.lootHeader.time:ClearAllPoints()
+    frame.lootHeader.time:SetPoint("LEFT", timeLeftPos, 0)
+    frame.lootHeader.time:SetWidth(timeWidth)
+    frame.lootHeader.time:SetJustifyH("CENTER")
+
+    frame.lootHeader.action:ClearAllPoints()
+    frame.lootHeader.action:SetPoint("LEFT", actionLeft, 0)
+    frame.lootHeader.action:SetWidth(actionWidth)
+    frame.lootHeader.action:SetJustifyH("CENTER")
+
+    for index = 1, rowCount do
+        local rowData = rows[index]
+        local row = frame.lootRows[index]
+
+        if not row then
+            row = CreateFrame("Frame", nil, frame.lootContent)
+            createBackdrop(row, { 0.08, 0.08, 0.08, 0.8 }, { 0.25, 0.08, 0.08, 0.8 })
+
+            row.separatorLabel = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.separatorLabel:SetPoint("LEFT", 12, 0)
+            row.separatorLabel:SetWidth(280)
+            row.separatorLabel:SetJustifyH("LEFT")
+            row.separatorLabel:SetTextColor(0.95, 0.82, 0.28)
+
+            row.iconButton = CreateFrame("Button", nil, row)
+            row.iconButton:SetSize(20, 20)
+            createBackdrop(row.iconButton, { 0.1, 0.1, 0.1, 0.95 }, { 0.8, 0.35, 0.05, 0.9 })
+
+            row.icon = row.iconButton:CreateTexture(nil, "ARTWORK")
+            row.icon:SetPoint("TOPLEFT", 3, -3)
+            row.icon:SetPoint("BOTTOMRIGHT", -3, 3)
+            row.icon:SetTexture("Interface/Icons/INV_Misc_QuestionMark")
+
+            row.itemLabel = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.itemLabel:SetJustifyH("LEFT")
+
+            row.time = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            row.time:SetJustifyH("CENTER")
+
+            row.actionButton = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+            setupMiniActionButton(row.actionButton, 56, 18, "В слот")
+            row.actionButton:SetScript("OnClick", function()
+                if row.entryId then
+                    addon:SelectLootEntryForAuction(row.entryId)
+                end
+            end)
+            row.actionButton:SetScript("OnEnter", function(selfButton)
+                GameTooltip:SetOwner(selfButton, "ANCHOR_TOP")
+                if row.canSelect then
+                    GameTooltip:AddLine("Перенести в слот")
+                    GameTooltip:AddLine("Подставляет предмет в верхний блок для следующего бида", 0.9, 0.9, 0.9)
+                elseif not addon:IsPlayerController() then
+                    GameTooltip:AddLine("Только мастер лутер может выбрать предмет", 1, 0.2, 0.2)
+                elseif addon:IsAuctionActive() then
+                    GameTooltip:AddLine("Сначала завершите текущий аукцион", 1, 0.2, 0.2)
+                else
+                    GameTooltip:AddLine("Предмет больше нельзя передать", 1, 0.2, 0.2)
+                end
+                GameTooltip:Show()
+            end)
+            row.actionButton:SetScript("OnLeave", function()
+                GameTooltip:Hide()
+            end)
+
+            row.iconButton:SetScript("OnClick", function()
+                if row.entryId and row.canSelect then
+                    addon:SelectLootEntryForAuction(row.entryId)
+                end
+            end)
+            row.iconButton:SetScript("OnEnter", function(selfButton)
+                if row.itemLink and row.itemLink ~= "" then
+                    GameTooltip:SetOwner(selfButton, "ANCHOR_RIGHT")
+                    GameTooltip:SetHyperlink(row.itemLink)
+                    GameTooltip:AddLine("Босс: " .. tostring(row.bossName or "Прочее"), 0.95, 0.82, 0.28)
+                    GameTooltip:AddLine("До передачи: " .. tostring(row.timeText or "-"), 0.9, 0.9, 0.9)
+                    if row.canSelect then
+                        GameTooltip:AddLine("ЛКМ: перенести в слот бида", 0.7, 1, 0.7)
+                    end
+                    GameTooltip:Show()
+                end
+            end)
+            row.iconButton:SetScript("OnLeave", function()
+                GameTooltip:Hide()
+            end)
+
+            frame.lootRows[index] = row
+        end
+
+        row:SetSize(contentWidth, 22)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -((index - 1) * 24))
+
+        if rowData.separator then
+            row.entryId = nil
+            row.itemLink = nil
+            row.bossName = nil
+            row.timeText = nil
+            row.canSelect = false
+            row.separator = true
+            row:SetBackdropColor(0.12, 0.03, 0.03, 0.88)
+            row:SetBackdropBorderColor(0.45, 0.1, 0.1, 0.82)
+            row.separatorLabel:SetText(tostring(rowData.title or "Прочее"))
+            row.separatorLabel:Show()
+            row.iconButton:Hide()
+            row.itemLabel:Hide()
+            row.time:Hide()
+            row.actionButton:Hide()
+            row:Show()
+        else
+            local itemName = rowData.itemName
+            local itemTexture = nil
+            local timeLeft = self:GetLootTransferTimeLeft(rowData)
+            local timeText = self:FormatLootTimeLeft(timeLeft)
+            local isSelected = selectedItemIdentity and getItemIdentity(rowData.itemLink) == selectedItemIdentity
+            local canSelect = canSelectAny and timeLeft > 0
+
+            if rowData.itemLink and GetItemInfo then
+                local _, _, _, _, _, _, _, _, _, fetchedTexture = GetItemInfo(rowData.itemLink)
+                itemTexture = fetchedTexture
+            end
+
+            row.entryId = rowData.id
+            row.itemLink = rowData.itemLink
+            row.bossName = rowData.bossName
+            row.timeText = timeText
+            row.canSelect = canSelect
+            row.separator = false
+
+            if not itemName or itemName == "" then
+                itemName = (GetItemInfo and GetItemInfo(rowData.itemLink)) or rowData.itemLink or "Неизвестный предмет"
+            end
+
+            row:SetBackdropColor(0.08, 0.08, 0.08, 0.8)
+            if isSelected then
+                row:SetBackdropBorderColor(1, 0.82, 0, 1)
+            elseif timeLeft <= 0 then
+                row:SetBackdropBorderColor(0.45, 0.08, 0.08, 0.8)
+            elseif timeLeft <= 1200 then
+                row:SetBackdropBorderColor(0.9, 0.35, 0.08, 0.95)
+            elseif timeLeft <= 3600 then
+                row:SetBackdropBorderColor(0.65, 0.28, 0.08, 0.9)
+            else
+                row:SetBackdropBorderColor(0.25, 0.08, 0.08, 0.8)
+            end
+
+            row.separatorLabel:Hide()
+            row.iconButton:Show()
+            row.iconButton:ClearAllPoints()
+            row.iconButton:SetPoint("LEFT", iconLeft, 0)
+            row.icon:SetTexture(itemTexture or "Interface/Icons/INV_Misc_QuestionMark")
+
+            row.itemLabel:Show()
+            row.itemLabel:ClearAllPoints()
+            row.itemLabel:SetPoint("LEFT", itemLeft, 0)
+            row.itemLabel:SetWidth(itemWidth)
+            row.itemLabel:SetTextColor(1, 1, 1)
+            if rowData.itemLink and rowData.itemLink ~= "" then
+                row.itemLabel:SetText(rowData.itemLink)
+            else
+                row.itemLabel:SetText(itemName)
+            end
+
+            row.time:Show()
+            row.time:ClearAllPoints()
+            row.time:SetPoint("LEFT", timeLeftPos, 0)
+            row.time:SetWidth(timeWidth)
+            row.time:SetText(timeText)
+            if timeLeft <= 0 then
+                row.time:SetTextColor(1, 0.25, 0.25)
+            elseif timeLeft <= 1200 then
+                row.time:SetTextColor(1, 0.45, 0.2)
+            elseif timeLeft <= 3600 then
+                row.time:SetTextColor(1, 0.8, 0.2)
+            else
+                row.time:SetTextColor(0.95, 0.95, 0.85)
+            end
+
+            row.actionButton:Show()
+            row.actionButton:ClearAllPoints()
+            row.actionButton:SetPoint("LEFT", actionLeft, 0)
+            row.actionButton:SetEnabled(canSelect)
+            row.actionButton:SetText("В слот")
+            row:Show()
+        end
+    end
+
+    for index = rowCount + 1, table.getn(frame.lootRows) do
+        frame.lootRows[index]:Hide()
+    end
+
+    frame.lootContent:SetHeight(math.max(rowCount * 24, 28))
+end
+
+function addon:RefreshDamageEncounterDropdown(damageSummary)
+    local frame = self.frame or self:CreateMainWindow()
+    local dropdown = frame.damageDropDown
+    local data = damageSummary or self:BuildDamageSummary()
+    local segments = data and data.segments or {}
+    local selectedKey = data and data.selectedKey or nil
+    local signatureParts = { tostring(selectedKey or ""), tostring(table.getn(segments)) }
+    local index
+
+    if not dropdown or not UIDropDownMenu_Initialize then
+        return
+    end
+
+    for index = 1, table.getn(segments) do
+        table.insert(signatureParts, tostring(segments[index].key or ""))
+    end
+
+    if frame.lastDamageDropdownSignature ~= table.concat(signatureParts, "|") then
+        UIDropDownMenu_Initialize(dropdown, function(selfDropDown, level)
+            local info
+            local itemIndex
+
+            if level ~= 1 then
+                return
+            end
+
+            for itemIndex = 1, table.getn(segments) do
+                info = UIDropDownMenu_CreateInfo()
+                info.text = tostring(segments[itemIndex].label or segments[itemIndex].name or "Бой")
+                info.value = tostring(segments[itemIndex].key or "")
+                info.checked = selectedKey and selectedKey == segments[itemIndex].key
+                info.disabled = false
+                info.func = function()
+                    addon:SetSelectedDamageSegmentKey(segments[itemIndex].key)
+                end
+                UIDropDownMenu_AddButton(info, level)
+            end
+        end)
+
+        frame.lastDamageDropdownSignature = table.concat(signatureParts, "|")
+    end
+
+    UIDropDownMenu_SetWidth(dropdown, 210)
+    UIDropDownMenu_SetSelectedValue(dropdown, selectedKey or "")
+    UIDropDownMenu_SetText(dropdown, data.selectedLabel or data.message or "Выберите босса")
+
+    if table.getn(segments) > 0 and UIDropDownMenu_EnableDropDown then
+        UIDropDownMenu_EnableDropDown(dropdown)
+    elseif UIDropDownMenu_DisableDropDown then
+        UIDropDownMenu_DisableDropDown(dropdown)
+    end
+
+    frame.lastDamageDropdownValue = selectedKey
+end
+
+function addon:RefreshDamageView(frame, damageSummary)
+    local data = damageSummary or self:BuildDamageSummary()
+    local rows = data and data.rows or {}
+    local rowCount = table.getn(rows)
+    local contentWidth = math.max(620, math.floor(((frame.damageListPanel and frame.damageListPanel:GetWidth()) or 656) - 36))
+    local indexWidth = 20
+    local classWidth = 118
+    local amountWidth = 112
+    local dpsWidth = 88
+    local percentWidth = 56
+    local percentLeft = contentWidth - percentWidth - 18
+    local dpsLeft = percentLeft - 10 - dpsWidth
+    local amountLeft = dpsLeft - 10 - amountWidth
+    local classLeft = amountLeft - 12 - classWidth
+    local playerLeft = 42
+    local playerWidth = math.max(120, classLeft - playerLeft - 12)
+    local classColors = CUSTOM_CLASS_COLORS or RAID_CLASS_COLORS or {}
+    local index
+
+    self:RefreshDamageEncounterDropdown(data)
+
+    frame.damageContent:SetWidth(contentWidth)
+    frame.damageTotalText:ClearAllPoints()
+    frame.damageTotalText:SetPoint("RIGHT", -10, 0)
+    frame.damageTotalText:SetText("Всего: " .. formatAmount(data.totalDamage or 0))
+
+    frame.damageTimeText:ClearAllPoints()
+    frame.damageTimeText:SetPoint("RIGHT", frame.damageTotalText, "LEFT", -12, 0)
+    frame.damageTimeText:SetText("Время: " .. formatClock(data.combatTime or 0))
+
+    frame.damagePlayersText:ClearAllPoints()
+    frame.damagePlayersText:SetPoint("RIGHT", frame.damageTimeText, "LEFT", -12, 0)
+    frame.damagePlayersText:SetText("Игроков: " .. tostring(data.playerCount or 0))
+
+    frame.damageHeader.player:ClearAllPoints()
+    frame.damageHeader.player:SetPoint("LEFT", playerLeft, 0)
+    frame.damageHeader.player:SetWidth(playerWidth)
+    frame.damageHeader.player:SetJustifyH("LEFT")
+
+    frame.damageHeader.class:ClearAllPoints()
+    frame.damageHeader.class:SetPoint("LEFT", classLeft, 0)
+    frame.damageHeader.class:SetWidth(classWidth)
+    frame.damageHeader.class:SetJustifyH("LEFT")
+
+    frame.damageHeader.amount:ClearAllPoints()
+    frame.damageHeader.amount:SetPoint("LEFT", amountLeft, 0)
+    frame.damageHeader.amount:SetWidth(amountWidth)
+    frame.damageHeader.amount:SetJustifyH("RIGHT")
+
+    frame.damageHeader.dps:ClearAllPoints()
+    frame.damageHeader.dps:SetPoint("LEFT", dpsLeft, 0)
+    frame.damageHeader.dps:SetWidth(dpsWidth)
+    frame.damageHeader.dps:SetJustifyH("RIGHT")
+
+    frame.damageHeader.percent:ClearAllPoints()
+    frame.damageHeader.percent:SetPoint("LEFT", percentLeft, 0)
+    frame.damageHeader.percent:SetWidth(percentWidth)
+    frame.damageHeader.percent:SetJustifyH("RIGHT")
+
+    if data.message and rowCount == 0 then
+        frame.damageEmptyText:SetText(tostring(data.message))
+    elseif data.selectedLabel then
+        frame.damageEmptyText:SetText("Для выбранного боя в Details нет игроков с уроном")
+    else
+        frame.damageEmptyText:SetText("Нет данных по урону")
+    end
+    frame.damageEmptyText:SetShown(rowCount == 0)
+
+    for index = 1, rowCount do
+        local rowData = rows[index]
+        local row = frame.damageRows[index]
+        local classToken = tostring(rowData.class or "")
+        local classColor = classColors[classToken]
+        local specLabel = tostring(rowData.specName or "")
+
+        if not row then
+            row = CreateFrame("Frame", nil, frame.damageContent)
+            createBackdrop(row, { 0.08, 0.08, 0.08, 0.8 }, { 0.25, 0.08, 0.08, 0.8 })
+
+            row.index = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+            row.index:SetPoint("LEFT", 12, 0)
+            row.index:SetWidth(indexWidth)
+            row.index:SetJustifyH("LEFT")
+
+            row.player = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            row.player:SetJustifyH("LEFT")
+
+            row.class = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            row.class:SetJustifyH("LEFT")
+
+            row.amount = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            row.amount:SetJustifyH("RIGHT")
+
+            row.dps = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            row.dps:SetJustifyH("RIGHT")
+
+            row.percent = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+            row.percent:SetJustifyH("RIGHT")
+
+            frame.damageRows[index] = row
+        end
+
+        row:SetSize(contentWidth, 22)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -((index - 1) * 24))
+
+        row.player:ClearAllPoints()
+        row.player:SetPoint("LEFT", playerLeft, 0)
+        row.player:SetWidth(playerWidth)
+
+        row.class:ClearAllPoints()
+        row.class:SetPoint("LEFT", classLeft, 0)
+        row.class:SetWidth(classWidth)
+
+        row.amount:ClearAllPoints()
+        row.amount:SetPoint("LEFT", amountLeft, 0)
+        row.amount:SetWidth(amountWidth)
+
+        row.dps:ClearAllPoints()
+        row.dps:SetPoint("LEFT", dpsLeft, 0)
+        row.dps:SetWidth(dpsWidth)
+
+        row.percent:ClearAllPoints()
+        row.percent:SetPoint("LEFT", percentLeft, 0)
+        row.percent:SetWidth(percentWidth)
+
+        row.index:SetText(tostring(rowData.rank or index))
+        row.player:SetText(tostring(rowData.name or "-"))
+        if specLabel == "" then
+            specLabel = "..."
+        end
+        row.class:SetText(specLabel)
+        row.amount:SetText(formatAmount(rowData.total or 0))
+        row.dps:SetText(formatRate(rowData.dps or 0))
+        row.percent:SetText(string.format("%.1f%%", tonumber(rowData.percent) or 0))
+
+        if classColor then
+            row.player:SetTextColor(classColor.r or 1, classColor.g or 1, classColor.b or 1)
+            row.class:SetTextColor(classColor.r or 1, classColor.g or 1, classColor.b or 1)
+        else
+            row.player:SetTextColor(1, 1, 1)
+            row.class:SetTextColor(0.95, 0.82, 0.28)
+        end
+
+        row.amount:SetTextColor(1, 0.82, 0)
+        row.dps:SetTextColor(0.92, 0.88, 0.72)
+        row.percent:SetTextColor(0.92, 0.88, 0.72)
+        row:Show()
+    end
+
+    for index = rowCount + 1, table.getn(frame.damageRows) do
+        frame.damageRows[index]:Hide()
+    end
+
+    frame.damageContent:SetHeight(math.max(rowCount * 24, 28))
+end
+
 function addon:RefreshMainWindow()
     local frame = self.frame or self:CreateMainWindow()
     local auction = self.currentAuction or {}
     local rows = self:GetSortedBids()
     local passes = self:GetSortedPasses()
-    local itemLink = auction.itemLink or self.pendingItemLink
+    local auctionMode = self:GetCurrentAuctionMode()
+    local isRollMode = auctionMode == "roll"
+    local split = self:ComputeDetailedSplit()
+    local itemLink = self.pendingItemLink or auction.itemLink
     local itemName = itemLink
     local texture = "Interface/Icons/INV_Misc_QuestionMark"
     local payout = GoldBidDB and GoldBidDB.ledger and GoldBidDB.ledger.payout
     local sales = GoldBidDB and GoldBidDB.ledger and GoldBidDB.ledger.sales or {}
+    local spending = self:BuildSpendingSummary()
+    local lootSummary = self:BuildLootSummary()
+    local damageSummary = self:BuildDamageSummary()
     local saleCount = table.getn(sales)
     local isController = self:IsPlayerController()
     local hasFullAccess = self:HasFullInterfaceAccess()
+    local canChangeMode = isController and not self:IsAuctionActive()
     local playerName = self:GetPlayerName()
     local hasPassed = auction.passes and auction.passes[playerName] or false
+    local hasRolled = auction.bids and auction.bids[playerName] ~= nil or false
+    local isEligibleForRoll = self:IsPlayerEligibleForCurrentRoll(playerName)
     local maxAuctionRows = hasFullAccess and table.getn(frame.rows) or 4
     local auctionWidth = math.floor((frame.auctionView and frame.auctionView:GetWidth()) or 704)
     local historyWidth
@@ -1982,21 +3344,36 @@ function addon:RefreshMainWindow()
         texture = itemTexture or texture
     end
 
+    self:ApplySuggestedMinBidForPendingItem(frame, itemLink)
+    if (not itemLink or itemLink == "") and not self:IsAuctionActive() then
+        self:ApplyDefaultAuctionInputs(frame, false)
+    end
+
     if frame.activeAuctionId ~= auction.id then
         frame.activeAuctionId = auction.id
         frame.bidManualOverride = false
         frame.incrementManualOverride = false
         frame.lastSuggestedBid = nil
+        frame.bidPreviewBase = nil
+        frame.bidPreviewValue = nil
     end
 
     frame.leaderText:SetText("Мастер лутер: " .. tostring(self:GetLeaderName() or "неизвестно"))
     if self:IsAuctionActive() then
-        frame.statusText:SetText("Статус: торги | " .. tostring(timeLeft) .. "s")
+        if isRollMode and self:IsRollRerollActive() then
+            frame.statusText:SetText("Статус: Переролл #" .. tostring((auction.rerollRound or 1)) .. " | " .. tostring(timeLeft) .. "s")
+        else
+            frame.statusText:SetText("Статус: " .. self:GetAuctionModeDisplayName(auctionMode) .. " | " .. tostring(timeLeft) .. "s")
+        end
     else
-        frame.statusText:SetText("Статус: " .. tostring(auction.status or "idle"))
+        frame.statusText:SetText("Статус: " .. tostring(auction.status or "idle") .. " | " .. self:GetAuctionModeDisplayName(auctionMode))
     end
     frame.itemText:SetText(itemName or "Перетащите предмет")
     frame.itemButton.icon:SetTexture(texture)
+    frame.tableHeader.amount:SetText(isRollMode and "Roll" or "Ставка")
+    frame.bidLabel:SetText(isRollMode and "Ваш roll" or "Ваша ставка")
+    frame.bidButton:SetText(isRollMode and "Roll" or "Ставка")
+    frame.startButton:SetText(isRollMode and "Старт Roll" or "Старт")
 
     if hasFullAccess then
         leftWidth = 340
@@ -2039,11 +3416,11 @@ function addon:RefreshMainWindow()
         frame.rows[index].amount:SetWidth(90)
     end
 
-    if self:IsAuctionActive() and not self:IsPlayerController() and auction.minBid and auction.minBid > 0 and not frame.minBidBox:HasFocus() then
-        frame.minBidBox:SetText(tostring(auction.minBid))
+    if self:IsAuctionActive() and not self:IsPlayerController() and not isRollMode and auction.minBid and auction.minBid > 0 and not frame.minBidBox:HasFocus() then
+        frame.minBidBox:SetText(formatGroupedInteger(auction.minBid))
     end
 
-    if self:IsAuctionActive() and not self:IsPlayerController() and auction.increment and auction.increment > 0 and not frame.incrementBox:HasFocus() then
+    if self:IsAuctionActive() and not self:IsPlayerController() and not isRollMode and auction.increment and auction.increment > 0 and not frame.incrementBox:HasFocus() then
         self:NormalizeClientRaiseStep()
     end
 
@@ -2053,14 +3430,18 @@ function addon:RefreshMainWindow()
         frame.durationBox:SetText(tostring(auction.duration))
     end
 
-    if self:IsAuctionActive() and not frame.bidBox:HasFocus() then
+    if self:IsAuctionActive() and isRollMode and not frame.bidBox:HasFocus() then
+        frame.bidBox:SetText(auction.bids and tostring(auction.bids[playerName] or "") or "")
+    elseif self:IsAuctionActive() and not frame.bidBox:HasFocus() then
         local suggestedBid = self:GetSuggestedBidBase()
-        local currentBid = tonumber(frame.bidBox:GetText())
-
-        if (not frame.bidManualOverride) or currentBid == frame.lastSuggestedBid then
+        if frame.bidPreviewValue and frame.bidPreviewBase == suggestedBid then
+            frame.bidBox:SetText(tostring(frame.bidPreviewValue))
+        else
+            frame.bidPreviewBase = nil
+            frame.bidPreviewValue = nil
             frame.bidBox:SetText(tostring(suggestedBid))
-            frame.lastSuggestedBid = suggestedBid
         end
+        frame.lastSuggestedBid = suggestedBid
     end
 
     for index = 1, table.getn(frame.rows) do
@@ -2072,7 +3453,7 @@ function addon:RefreshMainWindow()
         elseif bid then
             row.rank:SetText(index)
             row.player:SetText(bid.name)
-            row.amount:SetText(tostring(bid.amount) .. "g")
+            row.amount:SetText(isRollMode and tostring(bid.amount) or formatGold(bid.amount))
             if index == 1 then
                 row:SetBackdropBorderColor(1, 0.82, 0, 1)
                 row.player:SetTextColor(1, 0.82, 0)
@@ -2124,7 +3505,7 @@ function addon:RefreshMainWindow()
 
             if hasFullAccess then
                 if sale then
-                    row.item:SetText(tostring(sale.winner or "?") .. " - " .. tostring(sale.amount or 0) .. "g")
+                    row.item:SetText(tostring(sale.winner or "?") .. " - " .. formatGold(sale.amount or 0))
                 else
                     row.item:SetText(index == 1 and "Продаж нет" or "")
                 end
@@ -2167,9 +3548,25 @@ function addon:RefreshMainWindow()
             row.winner:SetJustifyH("LEFT")
 
             row.amount = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-            row.amount:SetPoint("RIGHT", -18, 0)
+            row.amount:SetPoint("RIGHT", -28, 0)
             row.amount:SetWidth(72)
             row.amount:SetJustifyH("RIGHT")
+
+            row.deleteButton = CreateFrame("Button", nil, row)
+            setupMiniActionButton(row.deleteButton, 18, 18, "X")
+            row.deleteButton:SetFrameLevel(row:GetFrameLevel() + 4)
+            row.deleteButton:SetScript("OnClick", function()
+                addon:ConfirmDeleteSale(row.saleIndex)
+            end)
+            row.deleteButton:SetScript("OnEnter", function(selfButton)
+                GameTooltip:SetOwner(selfButton, "ANCHOR_TOP")
+                GameTooltip:AddLine("Удалить лот")
+                GameTooltip:AddLine("Удаляет запись из сводки и вычитает сумму из банка", 0.9, 0.9, 0.9)
+                GameTooltip:Show()
+            end)
+            row.deleteButton:SetScript("OnLeave", function()
+                GameTooltip:Hide()
+            end)
 
             frame.summaryRows[index] = row
         end
@@ -2180,12 +3577,19 @@ function addon:RefreshMainWindow()
         row.item:SetWidth(summaryWinnerLeft - 58)
         row.winner:ClearAllPoints()
         row.winner:SetPoint("LEFT", summaryWinnerLeft, 0)
+        row.amount:ClearAllPoints()
+        row.amount:SetPoint("RIGHT", -28, 0)
+        row.deleteButton:ClearAllPoints()
+        row.deleteButton:SetPoint("RIGHT", -4, 0)
 
         itemLabel = sale.itemLink or sale.itemName or "Неизвестный лот"
+        row.saleIndex = index
         row.index:SetText(index)
         row.item:SetText(itemLabel)
         row.winner:SetText(tostring(sale.winner or "-"))
-        row.amount:SetText(tostring(sale.amount or 0) .. "g")
+        row.amount:SetText(formatGold(sale.amount or 0))
+        row.deleteButton:SetShown(isController)
+        row.deleteButton:SetEnabled(isController)
         row:Show()
     end
 
@@ -2194,26 +3598,43 @@ function addon:RefreshMainWindow()
     end
 
     frame.summaryContent:SetHeight(math.max(saleCount * 24, 28))
+    self:RefreshSpendingView(frame, spending)
+    self:RefreshLootView(frame, lootSummary)
+    self:RefreshDamageView(frame, damageSummary)
     self:RefreshSplitView(frame)
-    frame.compactPotText:SetText("Пот: " .. formatGold(GoldBidDB.ledger.pot or 0))
+    frame.compactPotText:SetText(self:GetAuctionModeDisplayName(auctionMode))
 
-    if payout then
-        frame.footerText:SetText("Пот: " .. formatGold(GoldBidDB.ledger.pot or 0) .. " | Сплит: " .. formatGold(payout.perPlayer or 0))
+    if frame.activeTab == "split" then
+        frame.footerText:SetText("Банк: " .. formatGold(GoldBidDB.ledger.pot or 0))
+    elseif frame.activeTab == "spend" then
+        frame.footerText:SetText("Банк: " .. formatGold(GoldBidDB.ledger.pot or 0) .. " | Потрачено: " .. formatGold(spending.totalSpent or 0))
+    elseif frame.activeTab == "loot" then
+        frame.footerText:SetText("Лут: " .. tostring(lootSummary.totalCount or 0) .. " | Срочно: " .. tostring(lootSummary.urgentCount or 0))
+    elseif frame.activeTab == "damage" then
+        frame.footerText:SetText("Босс: " .. tostring(damageSummary.segmentName or "-") .. " | Игроков: " .. tostring(damageSummary.playerCount or 0))
+    elseif payout then
+        frame.footerText:SetText("Режим: " .. self:GetAuctionModeDisplayName(auctionMode) .. " | Сплит: " .. formatGold(payout.perPlayer or 0))
     else
-        frame.footerText:SetText("Пот: " .. formatGold(GoldBidDB.ledger.pot or 0))
+        frame.footerText:SetText("Режим: " .. self:GetAuctionModeDisplayName(auctionMode))
     end
 
+    if frame.lastModeDropdownValue ~= auctionMode or frame.lastModeDropdownCanChange ~= canChangeMode then
+        self:RefreshModeDropdown()
+        frame.lastModeDropdownValue = auctionMode
+        frame.lastModeDropdownCanChange = canChangeMode
+    end
+    self:UpdateMainWindowLayout()
     frame.startButton:SetEnabled(self:IsPlayerController())
     frame.endButton:SetEnabled(self:IsPlayerController() and self:IsAuctionActive())
+    frame.compactSkipButton:SetEnabled(not hasFullAccess and self:IsAuctionActive() and not self:IsAuctionWindowSuppressed())
     if hasFullAccess then
         frame.resetButton:SetEnabled(self:IsPlayerController())
     else
         frame.resetButton:SetEnabled(not hasPassed)
     end
-    frame.bidButton:SetEnabled(not hasPassed)
-    frame.passButton:SetEnabled(not hasPassed)
-    frame.bidBox:EnableMouse(not hasPassed)
-    frame.addStepButton:SetEnabled(not hasPassed)
-    self:UpdateMainWindowLayout()
+    frame.bidButton:SetEnabled(not hasPassed and (not isRollMode or (isEligibleForRoll and not hasRolled)))
+    frame.passButton:SetEnabled(not hasPassed and (not isRollMode or (isEligibleForRoll and not hasRolled)))
+    frame.bidBox:EnableMouse((not hasPassed) and (not isRollMode))
+    frame.addStepButton:SetEnabled((not hasPassed) and (not isRollMode))
     self:SetMainTab(frame.activeTab or "auction", true)
 end

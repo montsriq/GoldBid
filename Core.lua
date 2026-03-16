@@ -4,6 +4,7 @@ GoldBid.version = "2.0.0"
 
 local addon = GoldBid
 local frame = CreateFrame("Frame")
+local npcTypeFlag = COMBATLOG_OBJECT_TYPE_NPC or 0
 
 local function splitMessage(message)
     local parts = {}
@@ -90,6 +91,102 @@ local function floorGold(value)
     return math.floor(value)
 end
 
+local function formatGroupedNumber(value)
+    local negative = false
+    local formatted
+    local changed
+
+    value = floorGold(value)
+
+    if value < 0 then
+        negative = true
+        value = math.abs(value)
+    end
+
+    formatted = tostring(value)
+
+    repeat
+        formatted, changed = string.gsub(formatted, "^([0-9]+)([0-9][0-9][0-9])", "%1 %2")
+    until changed == 0
+
+    if negative then
+        return "-" .. formatted
+    end
+
+    return formatted
+end
+
+local function formatGoldAmount(value)
+    return formatGroupedNumber(value) .. "g"
+end
+
+local function formatClockDuration(value)
+    local totalSeconds = math.max(0, safenum(value, 0))
+    local hours = math.floor(totalSeconds / 3600)
+    local minutes = math.floor((totalSeconds % 3600) / 60)
+    local seconds = math.floor(totalSeconds % 60)
+
+    if hours > 0 then
+        return string.format("%d:%02d:%02d", hours, minutes, seconds)
+    end
+
+    return string.format("%d:%02d", minutes, seconds)
+end
+
+local randomRollPattern = nil
+local lootItemSelfPattern = nil
+local lootItemSelfMultiplePattern = nil
+
+local function normalizeAuctionMode(mode)
+    mode = string.lower(tostring(mode or "goldbid"))
+
+    if mode == "roll" then
+        return "roll"
+    end
+
+    return "goldbid"
+end
+
+local function buildGlobalStringPattern(template)
+    template = tostring(template or "")
+    template = string.gsub(template, "%%s", "\001")
+    template = string.gsub(template, "%%d", "\002")
+    template = string.gsub(template, "([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+    template = string.gsub(template, "\001", "(.+)")
+    template = string.gsub(template, "\002", "(%%d+)")
+
+    return "^" .. template .. "$"
+end
+
+local function getRandomRollPattern()
+    local template
+
+    if randomRollPattern then
+        return randomRollPattern
+    end
+
+    template = RANDOM_ROLL_RESULT or "%s rolls %d (%d-%d)"
+    randomRollPattern = buildGlobalStringPattern(template)
+
+    return randomRollPattern
+end
+
+local function getLootItemSelfPattern()
+    if not lootItemSelfPattern then
+        lootItemSelfPattern = buildGlobalStringPattern(LOOT_ITEM_SELF or "You receive loot: %s.")
+    end
+
+    return lootItemSelfPattern
+end
+
+local function getLootItemSelfMultiplePattern()
+    if not lootItemSelfMultiplePattern then
+        lootItemSelfMultiplePattern = buildGlobalStringPattern(LOOT_ITEM_SELF_MULTIPLE or "You receive loot: %sx%d.")
+    end
+
+    return lootItemSelfMultiplePattern
+end
+
 local function getTalentTabNameAndPoints(index, isInspect, talentGroup)
     local first, second, third, fourth, fifth = GetTalentTabInfo(index, isInspect, false, talentGroup)
 
@@ -157,8 +254,11 @@ function addon:CreateDefaultDB()
             pot = 0,
             payout = nil,
         },
+        loot = {
+            entries = {},
+        },
         split = {
-            leaderSharePercent = 20,
+            leaderSharePercent = 0,
             substitutePercent = 100,
             entries = {},
             lastComputed = nil,
@@ -171,6 +271,8 @@ function addon:CreateDefaultDB()
             },
             autoStartOnDrag = false,
             controllerOverride = nil,
+            distributionMode = "goldbid",
+            damageSegmentKey = nil,
         },
     }
 end
@@ -183,11 +285,11 @@ function addon:EnsureDB()
     GoldBidDB.ledger = GoldBidDB.ledger or {}
     GoldBidDB.ledger.sales = GoldBidDB.ledger.sales or {}
     GoldBidDB.ledger.pot = GoldBidDB.ledger.pot or 0
+    GoldBidDB.loot = GoldBidDB.loot or {}
+    GoldBidDB.loot.entries = GoldBidDB.loot.entries or {}
     GoldBidDB.split = GoldBidDB.split or {}
     GoldBidDB.split.entries = GoldBidDB.split.entries or {}
-    if GoldBidDB.split.leaderSharePercent == nil then
-        GoldBidDB.split.leaderSharePercent = 20
-    end
+    GoldBidDB.split.leaderSharePercent = 0
     if GoldBidDB.split.substitutePercent == nil then
         GoldBidDB.split.substitutePercent = 100
     end
@@ -208,6 +310,1028 @@ function addon:EnsureDB()
     if GoldBidDB.ui.controllerOverride == "" then
         GoldBidDB.ui.controllerOverride = nil
     end
+    if GoldBidDB.ui.damageSegmentKey == "" then
+        GoldBidDB.ui.damageSegmentKey = nil
+    end
+    GoldBidDB.ui.distributionMode = normalizeAuctionMode(GoldBidDB.ui.distributionMode)
+end
+
+function addon:EnsureLootDB()
+    self:EnsureDB()
+    GoldBidDB.loot = GoldBidDB.loot or {}
+    GoldBidDB.loot.entries = GoldBidDB.loot.entries or {}
+end
+
+function addon:CreateLootEntryId()
+    self.lootSequence = (self.lootSequence or 0) + 1
+    return tostring(time()) .. "-loot-" .. tostring(self.lootSequence)
+end
+
+function addon:NormalizeLootEntry(entry)
+    if type(entry) ~= "table" then
+        return nil
+    end
+
+    entry.id = tostring(entry.id or self:CreateLootEntryId())
+    entry.itemLink = tostring(entry.itemLink or "")
+    entry.itemName = tostring(entry.itemName or "")
+    entry.bossName = tostring(entry.bossName or "Прочее")
+    entry.sourceGuid = tostring(entry.sourceGuid or "")
+    entry.lootedAt = safenum(entry.lootedAt, time())
+    entry.expiresAt = safenum(entry.expiresAt, entry.lootedAt + 7200)
+    entry.warned20 = entry.warned20 and true or false
+
+    return entry
+end
+
+function addon:GetLootEntries()
+    self:EnsureLootDB()
+    local entries = GoldBidDB.loot.entries
+    local index
+
+    for index = 1, table.getn(entries) do
+        self:NormalizeLootEntry(entries[index])
+    end
+
+    return entries
+end
+
+function addon:GetLootTransferTimeLeft(entry)
+    if not entry then
+        return 0
+    end
+
+    return math.max(0, safenum(entry.expiresAt, 0) - time())
+end
+
+function addon:FormatLootTimeLeft(seconds)
+    local hours
+    local minutes
+
+    seconds = math.max(0, safenum(seconds, 0))
+
+    if seconds <= 0 then
+        return "Истекло"
+    end
+
+    if seconds < 60 then
+        return tostring(seconds) .. "с"
+    end
+
+    hours = math.floor(seconds / 3600)
+    minutes = math.floor((seconds % 3600) / 60)
+
+    if hours > 0 then
+        return string.format("%dч %02dм", hours, minutes)
+    end
+
+    return string.format("%dм", minutes)
+end
+
+function addon:RememberLootSource(sourceGuid, sourceName)
+    if not sourceGuid or sourceGuid == "" or not sourceName or sourceName == "" then
+        return
+    end
+
+    self.recentLootSources = self.recentLootSources or {}
+    self.recentLootSources[tostring(sourceGuid)] = {
+        name = tostring(sourceName),
+        at = time(),
+    }
+    self.lastLootContext = {
+        name = tostring(sourceName),
+        at = time(),
+    }
+end
+
+function addon:CleanupRecentLootSources()
+    local now = time()
+    local sourceGuid
+    local sourceData
+
+    self.recentLootSources = self.recentLootSources or {}
+
+    for sourceGuid, sourceData in pairs(self.recentLootSources) do
+        if not sourceData or (now - safenum(sourceData.at, 0)) > 600 then
+            self.recentLootSources[sourceGuid] = nil
+        end
+    end
+
+    if self.lastLootContext and (now - safenum(self.lastLootContext.at, 0)) > 600 then
+        self.lastLootContext = nil
+    end
+end
+
+function addon:GetBossNameForLootSource(sourceGuid)
+    local sourceData
+
+    self:CleanupRecentLootSources()
+    self.recentLootSources = self.recentLootSources or {}
+
+    if sourceGuid and sourceGuid ~= "" then
+        sourceData = self.recentLootSources[tostring(sourceGuid)]
+
+        if sourceData and sourceData.name and sourceData.name ~= "" then
+            return tostring(sourceData.name)
+        end
+    end
+
+    if self.lastLootContext and self.lastLootContext.name and self.lastLootContext.name ~= "" then
+        return tostring(self.lastLootContext.name)
+    end
+
+    return "Прочее"
+end
+
+function addon:GetLootSourceGuidForSlot(slotIndex)
+    local sourceGuid
+
+    if not GetLootSourceInfo then
+        return nil
+    end
+
+    sourceGuid = select(1, GetLootSourceInfo(slotIndex))
+
+    if sourceGuid and sourceGuid ~= "" then
+        return tostring(sourceGuid)
+    end
+
+    return nil
+end
+
+function addon:RegisterLootEntry(itemLink, bossName, sourceGuid)
+    self:EnsureLootDB()
+    local entry = self:NormalizeLootEntry({
+        id = self:CreateLootEntryId(),
+        itemLink = itemLink,
+        itemName = (GetItemInfo and GetItemInfo(itemLink)) or itemLink,
+        bossName = bossName or "Прочее",
+        sourceGuid = sourceGuid or "",
+        lootedAt = time(),
+        expiresAt = time() + 7200,
+        warned20 = false,
+    })
+
+    if not entry or not itemLink or itemLink == "" then
+        return nil
+    end
+
+    table.insert(GoldBidDB.loot.entries, entry)
+    return entry
+end
+
+function addon:BuildLootTrackingKey(itemLink, bossName)
+    return tostring(itemLink or "") .. "|" .. tostring(bossName or "Прочее")
+end
+
+function addon:TrackRecentLootWindowEntry(itemLink, bossName)
+    local key
+    local record
+
+    if not itemLink or itemLink == "" then
+        return
+    end
+
+    self.recentLootWindowEntries = self.recentLootWindowEntries or {}
+    key = self:BuildLootTrackingKey(itemLink, bossName)
+    record = self.recentLootWindowEntries[key] or { count = 0, at = time() }
+    record.count = safenum(record.count, 0) + 1
+    record.at = time()
+    self.recentLootWindowEntries[key] = record
+end
+
+function addon:CleanupRecentLootWindowEntries()
+    local now = time()
+    local key
+    local record
+
+    self.recentLootWindowEntries = self.recentLootWindowEntries or {}
+
+    for key, record in pairs(self.recentLootWindowEntries) do
+        if not record or (now - safenum(record.at, 0)) > 15 then
+            self.recentLootWindowEntries[key] = nil
+        end
+    end
+end
+
+function addon:ConsumeRecentLootWindowEntry(itemLink, bossName)
+    local key
+    local record
+
+    if not itemLink or itemLink == "" then
+        return false
+    end
+
+    self:CleanupRecentLootWindowEntries()
+    key = self:BuildLootTrackingKey(itemLink, bossName)
+    record = self.recentLootWindowEntries and self.recentLootWindowEntries[key] or nil
+
+    if not record or safenum(record.count, 0) <= 0 then
+        return false
+    end
+
+    record.count = record.count - 1
+
+    if record.count <= 0 then
+        self.recentLootWindowEntries[key] = nil
+    else
+        record.at = time()
+        self.recentLootWindowEntries[key] = record
+    end
+
+    return true
+end
+
+function addon:CaptureLootWindowEntries()
+    local slotCount
+    local slotIndex
+    local itemLink
+    local sourceGuid
+    local bossName
+    local capturedCount = 0
+
+    if not GetNumLootItems then
+        return 0
+    end
+
+    slotCount = GetNumLootItems() or 0
+
+    for slotIndex = 1, slotCount do
+        if LootSlotHasItem and LootSlotHasItem(slotIndex) and not (LootSlotIsCoin and LootSlotIsCoin(slotIndex)) then
+            itemLink = GetLootSlotLink and GetLootSlotLink(slotIndex) or nil
+
+            if itemLink and itemLink ~= "" then
+                sourceGuid = self:GetLootSourceGuidForSlot(slotIndex)
+                bossName = self:GetBossNameForLootSource(sourceGuid)
+                self:RegisterLootEntry(itemLink, bossName, sourceGuid)
+                self:TrackRecentLootWindowEntry(itemLink, bossName)
+                capturedCount = capturedCount + 1
+            end
+        end
+    end
+
+    return capturedCount
+end
+
+function addon:ScheduleLootWindowRetry(attempts)
+    attempts = math.max(1, safenum(attempts, 3))
+    self.pendingLootWindowRetryAt = (GetTime and GetTime() or 0) + 0.2
+    self.pendingLootWindowRetryCount = math.max(safenum(self.pendingLootWindowRetryCount, 0), attempts)
+    self.pendingLootChatUntil = time() + 15
+end
+
+function addon:ProcessPendingLootWindowRetry()
+    local now
+    local capturedCount
+
+    if safenum(self.pendingLootWindowRetryCount, 0) <= 0 then
+        return
+    end
+
+    now = GetTime and GetTime() or 0
+
+    if now < safenum(self.pendingLootWindowRetryAt, 0) then
+        return
+    end
+
+    capturedCount = self:CaptureLootWindowEntries()
+
+    if capturedCount > 0 then
+        self.pendingLootWindowRetryCount = 0
+        self.pendingLootWindowRetryAt = nil
+
+        if self.RefreshMainWindow then
+            self:RefreshMainWindow()
+        end
+        return
+    end
+
+    self.pendingLootWindowRetryCount = self.pendingLootWindowRetryCount - 1
+
+    if self.pendingLootWindowRetryCount <= 0 then
+        self.pendingLootWindowRetryCount = 0
+        self.pendingLootWindowRetryAt = nil
+        return
+    end
+
+    self.pendingLootWindowRetryAt = now + 0.2
+end
+
+function addon:ExtractLootItemLinkFromMessage(message)
+    local itemLink
+
+    if not message or message == "" then
+        return nil
+    end
+
+    itemLink = string.match(message, getLootItemSelfPattern())
+
+    if itemLink and itemLink ~= "" then
+        return itemLink
+    end
+
+    itemLink = string.match(message, getLootItemSelfMultiplePattern())
+
+    if itemLink and itemLink ~= "" then
+        return itemLink
+    end
+
+    return nil
+end
+
+function addon:HandleLootChatMessage(message)
+    local itemLink
+    local bossName
+
+    if not self.pendingLootChatUntil or time() > self.pendingLootChatUntil then
+        return
+    end
+
+    itemLink = self:ExtractLootItemLinkFromMessage(message)
+
+    if not itemLink or itemLink == "" then
+        return
+    end
+
+    bossName = self:GetBossNameForLootSource(nil)
+
+    if self:ConsumeRecentLootWindowEntry(itemLink, bossName) then
+        return
+    end
+
+    self:RegisterLootEntry(itemLink, bossName, nil)
+
+    if self.RefreshMainWindow then
+        self:RefreshMainWindow()
+    end
+end
+
+function addon:HandleCombatLogEvent(...)
+    local subEvent = select(2, ...)
+    local destGUID = select(7, ...)
+    local destName = select(8, ...)
+    local destFlags = safenum(select(9, ...), 0)
+
+    if subEvent ~= "PARTY_KILL" and subEvent ~= "UNIT_DIED" and subEvent ~= "UNIT_DESTROYED" then
+        return
+    end
+
+    if not destGUID or not destName then
+        return
+    end
+
+    if bit and bit.band and npcTypeFlag > 0 and bit.band(destFlags, npcTypeFlag) == 0 then
+        return
+    end
+
+    self:RememberLootSource(destGUID, destName)
+end
+
+function addon:HandleLootOpened()
+    local capturedCount = self:CaptureLootWindowEntries()
+
+    self.pendingLootChatUntil = time() + 15
+
+    if capturedCount <= 0 then
+        self:ScheduleLootWindowRetry(5)
+    else
+        self.pendingLootWindowRetryCount = 0
+        self.pendingLootWindowRetryAt = nil
+    end
+
+    if self.RefreshMainWindow then
+        self:RefreshMainWindow()
+    end
+end
+
+function addon:BuildLootSummary()
+    local entries = self:GetLootEntries()
+    local groups = {}
+    local rows = {}
+    local groupOrder = {}
+    local totalCount = 0
+    local urgentCount = 0
+    local index
+    local group
+    local bossName
+    local timeLeft
+
+    for index = 1, table.getn(entries) do
+        local entry = entries[index]
+
+        bossName = tostring(entry.bossName or "Прочее")
+        group = groups[bossName]
+
+        if not group then
+            group = {
+                title = bossName,
+                entries = {},
+                firstAt = safenum(entry.lootedAt, 0),
+            }
+            groups[bossName] = group
+            table.insert(groupOrder, group)
+        end
+
+        table.insert(group.entries, entry)
+        if safenum(entry.lootedAt, 0) > group.firstAt then
+            group.firstAt = safenum(entry.lootedAt, 0)
+        end
+
+        totalCount = totalCount + 1
+        timeLeft = self:GetLootTransferTimeLeft(entry)
+        if timeLeft > 0 and timeLeft <= 1200 then
+            urgentCount = urgentCount + 1
+        end
+    end
+
+    table.sort(groupOrder, function(left, right)
+        if left.firstAt == right.firstAt then
+            return tostring(left.title or "") < tostring(right.title or "")
+        end
+
+        return left.firstAt > right.firstAt
+    end)
+
+    for index = 1, table.getn(groupOrder) do
+        group = groupOrder[index]
+
+        table.sort(group.entries, function(left, right)
+            local leftTime = self:GetLootTransferTimeLeft(left)
+            local rightTime = self:GetLootTransferTimeLeft(right)
+
+            if leftTime == rightTime then
+                return safenum(left.lootedAt, 0) > safenum(right.lootedAt, 0)
+            end
+
+            if leftTime <= 0 then
+                return false
+            end
+
+            if rightTime <= 0 then
+                return true
+            end
+
+            return leftTime < rightTime
+        end)
+
+        table.insert(rows, {
+            separator = true,
+            title = group.title,
+        })
+
+        for bossName = 1, table.getn(group.entries) do
+            table.insert(rows, group.entries[bossName])
+        end
+    end
+
+    return {
+        rows = rows,
+        totalCount = totalCount,
+        urgentCount = urgentCount,
+        bossCount = table.getn(groupOrder),
+    }
+end
+
+function addon:ShowLootTransferWarning(entry)
+    local itemLabel = tostring(entry and (entry.itemLink or entry.itemName) or "предмет")
+    local bossLabel = tostring(entry and entry.bossName or "Прочее")
+    local message = string.format("До передачи %s осталось меньше 20 минут. Источник: %s.", itemLabel, bossLabel)
+
+    if RaidNotice_AddMessage and RaidWarningFrame and ChatTypeInfo and ChatTypeInfo["RAID_WARNING"] then
+        RaidNotice_AddMessage(RaidWarningFrame, message, ChatTypeInfo["RAID_WARNING"])
+    elseif UIErrorsFrame and UIErrorsFrame.AddMessage then
+        UIErrorsFrame:AddMessage(message, 1, 0.2, 0.2, 1)
+    end
+
+    self:Print(message)
+end
+
+function addon:CheckLootExpiryWarnings()
+    local entries = self:GetLootEntries()
+    local index
+    local entry
+    local timeLeft
+
+    for index = 1, table.getn(entries) do
+        entry = entries[index]
+        timeLeft = self:GetLootTransferTimeLeft(entry)
+
+        if not entry.warned20 and timeLeft > 0 and timeLeft <= 1200 then
+            entry.warned20 = true
+            self:ShowLootTransferWarning(entry)
+        end
+    end
+end
+
+function addon:SelectLootEntryForAuction(entryId)
+    local entries = self:GetLootEntries()
+    local index
+    local entry
+
+    if not self:IsPlayerController() then
+        self:Print("Только мастер лутер может выбирать предмет из списка лута.")
+        return false
+    end
+
+    if self:IsAuctionActive() then
+        self:Print("Сначала завершите текущий аукцион.")
+        return false
+    end
+
+    for index = 1, table.getn(entries) do
+        if tostring(entries[index].id or "") == tostring(entryId or "") then
+            entry = entries[index]
+            break
+        end
+    end
+
+    if not entry or not entry.itemLink or entry.itemLink == "" then
+        return false
+    end
+
+    self:SetPendingItem(entry.itemLink)
+
+    if self.SetMainTab then
+        self:SetMainTab("auction")
+    end
+
+    return true
+end
+
+function addon:IsDetailsAvailable()
+    local details = _G.Details or _G._detalhes
+
+    return type(details) == "table" and type(details.GetCurrentCombat) == "function" and type(details.GetCombatSegments) == "function"
+end
+
+function addon:GetSelectedDamageSegmentKey()
+    self:EnsureDB()
+
+    return GoldBidDB.ui and GoldBidDB.ui.damageSegmentKey or nil
+end
+
+function addon:SetSelectedDamageSegmentKey(segmentKey)
+    self:EnsureDB()
+    GoldBidDB.ui.damageSegmentKey = (segmentKey and segmentKey ~= "") and tostring(segmentKey) or nil
+
+    if self.RefreshMainWindow then
+        self:RefreshMainWindow()
+    end
+end
+
+function addon:BuildDamageSegmentKey(combat, sourceTag)
+    local combatNumber = combat and combat.GetCombatNumber and combat:GetCombatNumber() or 0
+    local combatId = combat and combat.GetCombatId and combat:GetCombatId() or 0
+    local startTime = combat and combat.GetStartTime and combat:GetStartTime() or 0
+
+    return table.concat({
+        tostring(sourceTag or "history"),
+        tostring(combatNumber or 0),
+        tostring(combatId or 0),
+        tostring(startTime or 0),
+    }, ":")
+end
+
+function addon:BuildDamageSegmentLabel(segment)
+    local name = tostring(segment and segment.name or "Неизвестный босс")
+    local durationText = formatClockDuration(segment and segment.elapsed or 0)
+    local suffix = nil
+
+    if segment then
+        if segment.isCurrent then
+            suffix = "идёт бой"
+        elseif segment.endDate and segment.endDate ~= "" then
+            suffix = tostring(segment.endDate)
+        elseif segment.startDate and segment.startDate ~= "" then
+            suffix = tostring(segment.startDate)
+        elseif segment.combatNumber and segment.combatNumber > 0 then
+            suffix = "#" .. tostring(segment.combatNumber)
+        end
+    end
+
+    if suffix and suffix ~= "" then
+        return name .. " | " .. suffix .. " | " .. durationText
+    end
+
+    return name .. " | " .. durationText
+end
+
+function addon:GetDamageSpecName(playerName, classToken, specId)
+    local detailsFramework = _G.DetailsFramework
+    local splitEntries
+    local splitEntry
+    local specName = ""
+    local infoId
+    local infoName
+
+    specId = tonumber(specId) or 0
+    classToken = tostring(classToken or "")
+    playerName = normalizeName(playerName)
+
+    if specId > 0 and detailsFramework and type(detailsFramework.GetSpecializationInfoByID) == "function" then
+        infoId, infoName = detailsFramework.GetSpecializationInfoByID(specId)
+        specName = tostring(infoName or "")
+    end
+
+    if (not specName or specName == "") and GoldBidDB and GoldBidDB.split and GoldBidDB.split.entries and playerName then
+        splitEntries = GoldBidDB.split.entries
+        splitEntry = splitEntries[playerName]
+        specName = splitEntry and tostring(splitEntry.spec or "") or ""
+    end
+
+    if specName ~= "" then
+        return self:NormalizeSpecName(specName, classToken)
+    end
+
+    return ""
+end
+
+function addon:GetSuggestedMinBidForItem(itemLink)
+    local gearScoreFunc = _G.GearScore_GetItemScore
+    local itemLevel
+    local equipLoc
+    local gearScoreItemLevel
+    local itemId
+    local tokenInfo
+    local ok
+
+    if not itemLink or itemLink == "" or not GetItemInfo then
+        return nil
+    end
+
+    _, _, _, itemLevel, _, _, _, _, equipLoc = GetItemInfo(itemLink)
+    itemLevel = tonumber(itemLevel)
+    equipLoc = tostring(equipLoc or "")
+
+    if type(gearScoreFunc) == "function" then
+        ok, _, gearScoreItemLevel = pcall(gearScoreFunc, itemLink)
+        if ok then
+            gearScoreItemLevel = tonumber(gearScoreItemLevel)
+        else
+            gearScoreItemLevel = nil
+        end
+    end
+
+    if (not gearScoreItemLevel or gearScoreItemLevel <= 0) and type(_G.GS_Tokens) == "table" then
+        itemId = string.match(tostring(itemLink), "item:(%d+)")
+        tokenInfo = itemId and _G.GS_Tokens[itemId] or nil
+        gearScoreItemLevel = tokenInfo and tonumber(tokenInfo.ItemLevel) or gearScoreItemLevel
+    end
+
+    if itemLevel and itemLevel > 0 and gearScoreItemLevel and gearScoreItemLevel > 0 then
+        itemLevel = math.max(itemLevel, gearScoreItemLevel)
+    elseif (not itemLevel or itemLevel <= 0) and gearScoreItemLevel and gearScoreItemLevel > 0 then
+        itemLevel = gearScoreItemLevel
+    end
+
+    if not itemLevel or itemLevel <= 0 then
+        return nil
+    end
+
+    if itemLevel >= 239 and equipLoc == "INVTYPE_TRINKET" then
+        return 5000
+    end
+
+    if itemLevel >= 239 then
+        return 3000
+    end
+
+    if itemLevel >= 232 then
+        return 2000
+    end
+
+    if itemLevel >= 226 then
+        return 1000
+    end
+
+    return 100
+end
+
+function addon:GetSuggestedRaiseStepForMinBid(minBid)
+    local bid = tonumber(minBid)
+
+    if not bid then
+        return nil
+    end
+
+    if bid >= 5000 then
+        return 500
+    end
+
+    if bid >= 1000 then
+        return 100
+    end
+
+    return 10
+end
+
+function addon:GetDefaultAuctionMinBid()
+    return 1000
+end
+
+function addon:GetDefaultAuctionIncrement()
+    return self:GetSuggestedRaiseStepForMinBid(self:GetDefaultAuctionMinBid()) or 100
+end
+
+function addon:GetDefaultAuctionDuration()
+    return 30
+end
+
+function addon:IsBossDamageCombat(combat)
+    local bossInfo
+    local combatType
+
+    if type(combat) ~= "table" then
+        return false, nil, DETAILS_SEGMENTTYPE_GENERIC or 0
+    end
+
+    bossInfo = combat.GetBossInfo and combat:GetBossInfo() or combat.is_boss
+    combatType = combat.GetCombatType and combat:GetCombatType() or safenum(combat.combat_type, DETAILS_SEGMENTTYPE_GENERIC or 0)
+
+    if type(bossInfo) == "table" and next(bossInfo) ~= nil then
+        return true, bossInfo, combatType
+    end
+
+    if combatType == DETAILS_SEGMENTTYPE_RAID_BOSS or combatType == DETAILS_SEGMENTTYPE_DUNGEON_BOSS then
+        return true, bossInfo, combatType
+    end
+
+    return false, bossInfo, combatType
+end
+
+function addon:IsFallbackDamageCombat(combat, combatType)
+    local instanceType
+    local elapsed
+    local isTrash = false
+
+    if type(combat) ~= "table" then
+        return false
+    end
+
+    combatType = tonumber(combatType) or (DETAILS_SEGMENTTYPE_GENERIC or 0)
+    instanceType = tostring(combat.instance_type or "")
+    elapsed = combat.GetCombatTime and combat:GetCombatTime() or 0
+
+    if elapsed <= 0 then
+        return false
+    end
+
+    if combatType == DETAILS_SEGMENTTYPE_OVERALL then
+        return false
+    end
+
+    if type(combat.IsTrash) == "function" then
+        isTrash = combat:IsTrash() and true or false
+    elseif combat.is_trash then
+        isTrash = true
+    end
+
+    if isTrash then
+        return false
+    end
+
+    if combatType == DETAILS_SEGMENTTYPE_RAID_BOSS or combatType == DETAILS_SEGMENTTYPE_DUNGEON_BOSS then
+        return true
+    end
+
+    return instanceType == "raid" or instanceType == "party"
+end
+
+function addon:GetAvailableDamageSegments()
+    local segments = {}
+    local fallbackSegments = {}
+    local seen = {}
+    local details = _G.Details or _G._detalhes
+    local history
+    local index
+
+    if type(details) ~= "table" then
+        return segments
+    end
+
+    local function addCombat(combat, sourceTag, isCurrent)
+        local bossInfo
+        local combatType
+        local segment
+        local startDate
+        local endDate
+        local isBossCombat
+
+        if type(combat) ~= "table" or type(combat.GetActorList) ~= "function" or type(combat.GetCombatName) ~= "function" then
+            return
+        end
+
+        isBossCombat, bossInfo, combatType = self:IsBossDamageCombat(combat)
+
+        segment = {
+            key = self:BuildDamageSegmentKey(combat, sourceTag),
+            combat = combat,
+            bossInfo = bossInfo,
+            name = combat:GetCombatName(true),
+            elapsed = combat.GetCombatTime and combat:GetCombatTime() or 0,
+            combatNumber = combat.GetCombatNumber and combat:GetCombatNumber() or 0,
+            combatId = combat.GetCombatId and combat:GetCombatId() or 0,
+            isCurrent = isCurrent and true or false,
+        }
+
+        if not segment.name or segment.name == "" or segment.name == UNKNOWN then
+            if type(bossInfo) == "table" then
+                segment.name = bossInfo.encounter or bossInfo.name or segment.name
+            end
+        end
+
+        if not segment.name or segment.name == "" or segment.name == UNKNOWN then
+            segment.name = "Бой"
+        end
+
+        if seen[segment.key] then
+            return
+        end
+
+        if combat.GetDate then
+            startDate, endDate = combat:GetDate()
+            segment.startDate = startDate
+            segment.endDate = endDate
+        end
+
+        segment.label = self:BuildDamageSegmentLabel(segment)
+
+        if isBossCombat then
+            seen[segment.key] = true
+            table.insert(segments, segment)
+        elseif self:IsFallbackDamageCombat(combat, combatType) then
+            seen[segment.key] = true
+            table.insert(fallbackSegments, segment)
+        end
+    end
+
+    if type(details.GetCurrentCombat) == "function" then
+        addCombat(details:GetCurrentCombat(), "current", true)
+    end
+
+    if type(details.GetCombatSegments) == "function" then
+        history = details:GetCombatSegments() or {}
+
+        for index = 1, table.getn(history) do
+            addCombat(history[index], "history", false)
+        end
+    end
+
+    local function sortSegments(list)
+        table.sort(list, function(left, right)
+            local leftCurrent = left and left.isCurrent and 1 or 0
+            local rightCurrent = right and right.isCurrent and 1 or 0
+            local leftNumber = left and safenum(left.combatNumber, 0) or 0
+            local rightNumber = right and safenum(right.combatNumber, 0) or 0
+            local leftStart = left and left.combat and left.combat.GetStartTime and left.combat:GetStartTime() or 0
+            local rightStart = right and right.combat and right.combat.GetStartTime and right.combat:GetStartTime() or 0
+
+            if leftCurrent ~= rightCurrent then
+                return leftCurrent > rightCurrent
+            end
+
+            if leftNumber ~= rightNumber then
+                return leftNumber > rightNumber
+            end
+
+            if leftStart ~= rightStart then
+                return leftStart > rightStart
+            end
+
+            return tostring(left.name or "") < tostring(right.name or "")
+        end)
+    end
+
+    sortSegments(segments)
+
+    if table.getn(segments) > 0 then
+        return segments
+    end
+
+    sortSegments(fallbackSegments)
+    return fallbackSegments
+end
+
+function addon:BuildDamageSummary()
+    local summary = {
+        available = self:IsDetailsAvailable(),
+        segments = {},
+        rows = {},
+        selectedKey = nil,
+        selectedLabel = nil,
+        totalDamage = 0,
+        combatTime = 0,
+        playerCount = 0,
+        message = nil,
+    }
+    local segments
+    local selectedKey
+    local selectedSegment
+    local actors
+    local actorIndex
+    local totalDamage = 0
+
+    self:EnsureDB()
+
+    if not summary.available then
+        summary.message = "Details не найден или ещё не загрузился."
+        return summary
+    end
+
+    segments = self:GetAvailableDamageSegments()
+    summary.segments = segments
+
+    if table.getn(segments) == 0 then
+        summary.message = "В Details пока нет сохранённых боёв с боссами."
+        return summary
+    end
+
+    selectedKey = self:GetSelectedDamageSegmentKey()
+
+    for actorIndex = 1, table.getn(segments) do
+        if segments[actorIndex].key == selectedKey then
+            selectedSegment = segments[actorIndex]
+            break
+        end
+    end
+
+    if not selectedSegment then
+        selectedSegment = segments[1]
+        selectedKey = selectedSegment and selectedSegment.key or nil
+        GoldBidDB.ui.damageSegmentKey = selectedKey
+    end
+
+    if not selectedSegment or type(selectedSegment.combat) ~= "table" then
+        summary.message = "Не удалось получить бой из Details."
+        return summary
+    end
+
+    summary.selectedKey = selectedKey
+    summary.selectedLabel = selectedSegment.label
+    summary.combatTime = selectedSegment.combat.GetCombatTime and selectedSegment.combat:GetCombatTime() or 0
+    summary.segmentName = selectedSegment.name
+    summary.segment = selectedSegment
+
+    actors = selectedSegment.combat.GetActorList and selectedSegment.combat:GetActorList(DETAILS_ATTRIBUTE_DAMAGE or 1) or {}
+
+    for actorIndex = 1, table.getn(actors) do
+        local actor = actors[actorIndex]
+        local actorName
+        local actorTotal
+        local actorClass
+        local actorSpecId
+        local actorSpecName
+        local isPlayer = false
+
+        if actor then
+            if type(actor.IsPlayer) == "function" then
+                isPlayer = actor:IsPlayer()
+            else
+                isPlayer = actor.grupo and true or false
+            end
+        end
+
+        if isPlayer and actor and actor.grupo then
+            actorName = normalizeName(actor.nome or actor.name)
+            actorTotal = safenum(actor.total, 0)
+            actorClass = tostring(actor.classe or actor.class or "")
+            actorSpecId = tonumber(actor.spec) or 0
+            actorSpecName = self:GetDamageSpecName(actorName, actorClass, actorSpecId)
+
+            if actorName and actorName ~= "" then
+                totalDamage = totalDamage + actorTotal
+                table.insert(summary.rows, {
+                    name = actorName,
+                    class = actorClass,
+                    specId = actorSpecId,
+                    specName = actorSpecName,
+                    total = actorTotal,
+                    dps = summary.combatTime > 0 and round2(actorTotal / summary.combatTime) or 0,
+                    activeTime = type(actor.Tempo) == "function" and actor:Tempo() or 0,
+                    spec = actor.spec or 0,
+                })
+            end
+        end
+    end
+
+    table.sort(summary.rows, function(left, right)
+        if safenum(left.total, 0) == safenum(right.total, 0) then
+            return tostring(left.name or "") < tostring(right.name or "")
+        end
+
+        return safenum(left.total, 0) > safenum(right.total, 0)
+    end)
+
+    for actorIndex = 1, table.getn(summary.rows) do
+        local row = summary.rows[actorIndex]
+
+        row.rank = actorIndex
+        row.percent = totalDamage > 0 and round2((safenum(row.total, 0) / totalDamage) * 100) or 0
+    end
+
+    summary.totalDamage = totalDamage
+    summary.playerCount = table.getn(summary.rows)
+    return summary
 end
 
 function addon:GetGroupRosterNames()
@@ -443,15 +1567,20 @@ function addon:EnsureSplitEntry(name)
     local leaderName = self:GetLeaderName() or self:GetPlayerName()
     local isLeader = normalizeName(name) == normalizeName(leaderName)
     local entry = entries[name]
+    local adjustmentsMissing = false
 
     if not entry then
         entry = {
             role = isLeader and "рл" or "дд",
             percent = isLeader and 0 or 100,
-            note = "",
+            penaltyNote = "",
+            bonusNote = "",
+            penaltyAdjust = 0,
+            bonusAdjust = 0,
             debt = 0,
             spec = "",
             roleManual = false,
+            sentAmount = nil,
         }
         entries[name] = entry
     end
@@ -461,11 +1590,29 @@ function addon:EnsureSplitEntry(name)
     end
 
     if entry.percent == nil then
-        entry.percent = isLeader and 0 or 100
+        entry.percent = self:GetDefaultPercentForRole(name, entry.role)
     end
 
-    if entry.note == nil then
-        entry.note = ""
+    if entry.penaltyNote == nil then
+        if entry.note ~= nil and entry.note ~= "" then
+            entry.penaltyNote = tostring(entry.note)
+        else
+            entry.penaltyNote = ""
+        end
+    end
+
+    if entry.bonusNote == nil then
+        entry.bonusNote = ""
+    end
+
+    adjustmentsMissing = entry.penaltyAdjust == nil and entry.bonusAdjust == nil
+
+    if entry.penaltyAdjust == nil then
+        entry.penaltyAdjust = 0
+    end
+
+    if entry.bonusAdjust == nil then
+        entry.bonusAdjust = 0
     end
 
     if entry.debt == nil then
@@ -480,7 +1627,96 @@ function addon:EnsureSplitEntry(name)
         entry.roleManual = false
     end
 
+    if entry.sentAmount ~= nil then
+        entry.sentAmount = floorGold(entry.sentAmount)
+    end
+
+    if adjustmentsMissing then
+        self:SyncSplitAdjustmentsToPercent(name, entry)
+    end
+
     return entry
+end
+
+function addon:GetAuctionModeDisplayName(mode)
+    if normalizeAuctionMode(mode) == "roll" then
+        return "Roll"
+    end
+
+    return "GoldBid"
+end
+
+function addon:GetSelectedAuctionMode()
+    self:EnsureDB()
+    return normalizeAuctionMode(GoldBidDB.ui and GoldBidDB.ui.distributionMode)
+end
+
+function addon:SetSelectedAuctionMode(mode)
+    self:EnsureDB()
+    GoldBidDB.ui.distributionMode = normalizeAuctionMode(mode)
+
+    if self.RefreshModeDropdown then
+        self:RefreshModeDropdown()
+    end
+
+    if self.RefreshMainWindow then
+        self:RefreshMainWindow()
+    end
+end
+
+function addon:GetCurrentAuctionMode()
+    self:EnsureAuctionState()
+
+    if self.currentAuction and self.currentAuction.id and self.currentAuction.status == "running" then
+        return normalizeAuctionMode(self.currentAuction.mode)
+    end
+
+    return self:GetSelectedAuctionMode()
+end
+
+function addon:IsRollAuction()
+    return self:GetCurrentAuctionMode() == "roll"
+end
+
+function addon:HasPlayerRolled(name)
+    self:EnsureAuctionState()
+    name = normalizeName(name)
+
+    return name and self.currentAuction.bids and self.currentAuction.bids[name] ~= nil or false
+end
+
+function addon:EncodeNameSet(values)
+    local rows = {}
+    local name
+
+    if type(values) ~= "table" then
+        return ""
+    end
+
+    for name in pairs(values) do
+        if name and name ~= "" then
+            table.insert(rows, tostring(name))
+        end
+    end
+
+    table.sort(rows)
+    return table.concat(rows, ",")
+end
+
+function addon:DecodeNameSet(serialized)
+    local values = {}
+    local index
+    local entries = splitList(serialized, ",")
+
+    for index = 1, table.getn(entries) do
+        local name = normalizeName(entries[index])
+
+        if name then
+            values[name] = true
+        end
+    end
+
+    return values
 end
 
 function addon:EnsureSplitDB()
@@ -491,9 +1727,7 @@ function addon:EnsureSplitDB()
     GoldBidDB.split = GoldBidDB.split or {}
     GoldBidDB.split.entries = GoldBidDB.split.entries or {}
 
-    if GoldBidDB.split.leaderSharePercent == nil then
-        GoldBidDB.split.leaderSharePercent = 20
-    end
+    GoldBidDB.split.leaderSharePercent = 0
 
     if GoldBidDB.split.substitutePercent == nil then
         GoldBidDB.split.substitutePercent = 100
@@ -514,7 +1748,7 @@ end
 
 function addon:SetLeaderSharePercent(value)
     self:EnsureSplitDB()
-    GoldBidDB.split.leaderSharePercent = math.max(0, math.min(100, safenum(value, 20)))
+    GoldBidDB.split.leaderSharePercent = 0
 
     if self.RefreshMainWindow then
         self:RefreshMainWindow()
@@ -636,20 +1870,33 @@ function addon:SetSplitEntrySpec(name, specName)
     local unit
     local classToken
     local roleBySpec
+    local previousRole
+    local previousPercent
+    local previousDefaultPercent
 
     if not name or name == "" then
         return
     end
 
     entry = self:EnsureSplitEntry(name)
+    previousRole = tostring(entry.role or "")
+    previousPercent = safenum(entry.percent, 0)
     entry.spec = tostring(specName or "")
 
     unit = self:GetUnitIdForName(name)
     classToken = unit and select(2, UnitClass(unit)) or nil
     roleBySpec = self:GetRoleForSpec(entry.spec, classToken)
+    previousDefaultPercent = self:GetDefaultPercentForRole(name, previousRole)
 
     if roleBySpec and not entry.roleManual and entry.role ~= "рл" and entry.role ~= "замена" then
         entry.role = roleBySpec
+
+        if previousPercent == previousDefaultPercent then
+            entry.percent = self:GetDefaultPercentForRole(name, roleBySpec)
+            self:ResetSplitAdjustments(entry)
+        else
+            self:SyncSplitAdjustmentsToPercent(name, entry)
+        end
     end
 
     if self.RefreshMainWindow then
@@ -701,6 +1948,23 @@ function addon:GetUnitIdForName(name)
                 return "party" .. index
             end
         end
+    end
+
+    return nil
+end
+
+function addon:GetGuildNameForPlayer(name)
+    local unit = self:GetUnitIdForName(name)
+    local guildName
+
+    if not unit or not GetGuildInfo then
+        return nil
+    end
+
+    guildName = GetGuildInfo(unit)
+
+    if guildName and guildName ~= "" then
+        return tostring(guildName)
     end
 
     return nil
@@ -855,21 +2119,91 @@ function addon:GetDefaultPercentForRole(name, role)
         return math.max(0, safenum(GoldBidDB.split.substitutePercent, 50))
     end
 
+    if role == "хил" then
+        return 115
+    end
+
     return 100
 end
 
-function addon:UpdateSplitEntryField(name, field, value)
+function addon:GetSplitRoleSortRank(role, isLeader, isSubstitute)
+    role = tostring(role or "")
+
+    if isLeader then
+        return 0
+    end
+
+    if role == "танк" then
+        return isSubstitute and 11 or 1
+    end
+
+    if role == "хил" then
+        return isSubstitute and 12 or 2
+    end
+
+    if role == "дд" then
+        return isSubstitute and 13 or 3
+    end
+
+    if role == "замена" or isSubstitute then
+        return 14
+    end
+
+    return 4
+end
+
+function addon:ResetSplitAdjustments(entry)
+    if not entry then
+        return
+    end
+
+    entry.penaltyAdjust = 0
+    entry.bonusAdjust = 0
+end
+
+function addon:SyncSplitAdjustmentsToPercent(name, entry)
+    local defaultPercent
+    local percent
+    local delta
+
+    if not entry then
+        return
+    end
+
+    defaultPercent = self:GetDefaultPercentForRole(name, entry.role)
+    percent = math.max(0, safenum(entry.percent, defaultPercent))
+    delta = percent - defaultPercent
+
+    if delta > 0 then
+        entry.bonusAdjust = delta
+        entry.penaltyAdjust = 0
+    elseif delta < 0 then
+        entry.penaltyAdjust = math.abs(delta)
+        entry.bonusAdjust = 0
+    else
+        self:ResetSplitAdjustments(entry)
+    end
+end
+
+function addon:UpdateSplitEntryField(name, field, value, skipRefresh)
     self:EnsureSplitDB()
     local entry
+    local previousRole
+    local previousPercent
+    local previousDefaultPercent
 
     if not name or name == "" then
         return
     end
 
     entry = self:EnsureSplitEntry(name)
+    previousRole = tostring(entry.role or "")
+    previousPercent = safenum(entry.percent, 0)
+    previousDefaultPercent = self:GetDefaultPercentForRole(name, previousRole)
 
     if field == "percent" then
         entry.percent = math.max(0, safenum(value, entry.percent or 0))
+        self:SyncSplitAdjustmentsToPercent(name, entry)
     elseif field == "debt" then
         entry.debt = safenum(value, entry.debt or 0)
     elseif field == "role" then
@@ -882,11 +2216,20 @@ function addon:UpdateSplitEntryField(name, field, value)
 
             entry.role = self:GetRoleForSpec(entry.spec, classToken) or entry.role
         end
-    elseif field == "note" then
-        entry.note = tostring(value or "")
+
+        if previousPercent == previousDefaultPercent then
+            entry.percent = self:GetDefaultPercentForRole(name, entry.role)
+            self:ResetSplitAdjustments(entry)
+        else
+            self:SyncSplitAdjustmentsToPercent(name, entry)
+        end
+    elseif field == "note" or field == "penaltyNote" then
+        entry.penaltyNote = tostring(value or "")
+    elseif field == "bonusNote" then
+        entry.bonusNote = tostring(value or "")
     end
 
-    if self.RefreshMainWindow then
+    if not skipRefresh and self.RefreshMainWindow then
         self:RefreshMainWindow()
     end
 end
@@ -903,31 +2246,29 @@ function addon:ApplySplitPreset(name, preset)
 
     if preset == "bonus" then
         entry.percent = math.max(0, safenum(entry.percent, 0) + 5)
+        entry.bonusAdjust = math.max(0, safenum(entry.bonusAdjust, 0) + 5)
     elseif preset == "penalty" then
         entry.percent = math.max(0, safenum(entry.percent, 0) - 5)
+        entry.penaltyAdjust = math.max(0, safenum(entry.penaltyAdjust, 0) + 5)
     elseif preset == "substitute" then
         entry.role = "замена"
         entry.roleManual = true
         entry.percent = self:GetDefaultPercentForRole(name, "замена")
-        if entry.note == "" then
-            entry.note = "Замена"
-        end
+        self:ResetSplitAdjustments(entry)
     elseif preset == "main" then
         if normalizeName(name) == normalizeName(self:GetLeaderName() or self:GetPlayerName()) then
             entry.role = "рл"
             entry.percent = 0
             entry.roleManual = true
+            self:ResetSplitAdjustments(entry)
         else
             local unit = self:GetUnitIdForName(name)
             local classToken = unit and select(2, UnitClass(unit)) or nil
 
             entry.role = self:GetRoleForSpec(entry.spec, classToken) or "дд"
-            entry.percent = self:GetDefaultPercentForRole(name, "дд")
+            entry.percent = self:GetDefaultPercentForRole(name, entry.role)
             entry.roleManual = false
-        end
-
-        if entry.note == "Замена" then
-            entry.note = ""
+            self:ResetSplitAdjustments(entry)
         end
     end
 
@@ -936,19 +2277,36 @@ function addon:ApplySplitPreset(name, preset)
     end
 end
 
+function addon:GetSplitNoteText(penaltyNote, bonusNote)
+    local lines = {}
+    local penalty = tostring(penaltyNote or "")
+    local bonus = tostring(bonusNote or "")
+
+    if penalty ~= "" then
+        table.insert(lines, "Косяки: " .. penalty)
+    end
+
+    if bonus ~= "" then
+        table.insert(lines, "Плюсики: " .. bonus)
+    end
+
+    return table.concat(lines, "\n")
+end
+
 function addon:ComputeDetailedSplit()
     self:EnsureSplitDB()
     local roster = self:RefreshSplitRoster()
-    local leaderPercent = math.max(0, math.min(100, safenum(GoldBidDB.split.leaderSharePercent, 20)))
+    local leaderPercent = 0
     local totalPot = safenum(GoldBidDB.ledger.pot, 0)
-    local leaderShareAmount = floorGold(totalPot * (leaderPercent / 100))
-    local distributablePot = floorGold(totalPot - leaderShareAmount)
+    local leaderShareAmount = 0
+    local distributablePot = floorGold(totalPot)
     local results = {}
     local totalWeight = 0
     local totalDebt = 0
     local totalNet = 0
     local mainCount = 0
     local substituteCount = 0
+    local eligibleCount = 0
     local baseShare
     local index
 
@@ -961,6 +2319,9 @@ function addon:ComputeDetailedSplit()
 
         totalWeight = totalWeight + weight
         totalDebt = totalDebt + debt
+        if percent > 0 then
+            eligibleCount = eligibleCount + 1
+        end
 
         table.insert(results, {
             index = index,
@@ -968,33 +2329,38 @@ function addon:ComputeDetailedSplit()
             spec = tostring(entry.spec or ""),
             role = tostring(entry.role or ""),
             percent = percent,
-            note = tostring(entry.note or ""),
+            penaltyNote = tostring(entry.penaltyNote or ""),
+            bonusNote = tostring(entry.bonusNote or ""),
+            penaltyAdjust = math.max(0, safenum(entry.penaltyAdjust, 0)),
+            bonusAdjust = math.max(0, safenum(entry.bonusAdjust, 0)),
+            note = self:GetSplitNoteText(entry.penaltyNote, entry.bonusNote),
             debt = debt,
             weight = weight,
+            sentAmount = entry.sentAmount,
             isLeader = normalizeName(name) == normalizeName(self:GetLeaderName() or self:GetPlayerName()),
             isSubstitute = tostring(entry.role or "") == "замена",
         })
     end
 
     table.sort(results, function(left, right)
-        if left.isLeader ~= right.isLeader then
-            return left.isLeader
-        end
+        local leftRank = self:GetSplitRoleSortRank(left.role, left.isLeader, left.isSubstitute)
+        local rightRank = self:GetSplitRoleSortRank(right.role, right.isLeader, right.isSubstitute)
 
-        if left.isSubstitute ~= right.isSubstitute then
-            return not left.isSubstitute
+        if leftRank ~= rightRank then
+            return leftRank < rightRank
         end
 
         return tostring(left.name or "") < tostring(right.name or "")
     end)
 
-    baseShare = totalWeight > 0 and floorGold(distributablePot / totalWeight) or 0
+    baseShare = eligibleCount > 0 and floorGold(distributablePot / eligibleCount) or 0
 
     for index = 1, table.getn(results) do
         local row = results[index]
 
         row.gross = floorGold(baseShare * row.weight)
         row.net = floorGold(row.gross - row.debt)
+        row.sent = row.net > 0 and row.sentAmount ~= nil and floorGold(row.sentAmount) == floorGold(row.net)
         totalNet = totalNet + row.net
 
         if row.isSubstitute then
@@ -1010,6 +2376,7 @@ function addon:ComputeDetailedSplit()
         leaderShareAmount = floorGold(leaderShareAmount),
         distributablePot = distributablePot,
         baseShare = baseShare,
+        eligibleCount = eligibleCount,
         totalWeight = round2(totalWeight),
         totalDebt = floorGold(totalDebt),
         totalNet = floorGold(totalNet),
@@ -1087,6 +2454,11 @@ function addon:BuildMailPayoutQueue()
             table.insert(queue, {
                 name = recipient,
                 amount = amount,
+                percent = math.max(0, safenum((row and row.percent) or 0, 0)),
+                penaltyNote = tostring((row and row.penaltyNote) or ""),
+                bonusNote = tostring((row and row.bonusNote) or ""),
+                penaltyAdjust = math.max(0, safenum((row and row.penaltyAdjust) or 0, 0)),
+                bonusAdjust = math.max(0, safenum((row and row.bonusAdjust) or 0, 0)),
             })
         end
     end
@@ -1094,13 +2466,144 @@ function addon:BuildMailPayoutQueue()
     return queue
 end
 
+function addon:BuildMailPayoutBody(entry)
+    local lines = {}
+    local percent = math.max(0, safenum(entry and entry.percent or 0, 0))
+    local penaltyNote = tostring(entry and entry.penaltyNote or "")
+    local bonusNote = tostring(entry and entry.bonusNote or "")
+    local penaltyAdjust = math.max(0, safenum(entry and entry.penaltyAdjust or 0, 0))
+    local bonusAdjust = math.max(0, safenum(entry and entry.bonusAdjust or 0, 0))
+
+    table.insert(lines, "GoldBid GDKP выплата.")
+    table.insert(lines, "")
+    table.insert(lines, string.format("Процент доли: %d%%", percent))
+
+    if penaltyNote ~= "" or penaltyAdjust > 0 then
+        table.insert(lines, "")
+        if penaltyNote ~= "" and penaltyAdjust > 0 then
+            table.insert(lines, string.format("Косяки (-%d): %s", penaltyAdjust, penaltyNote))
+        elseif penaltyAdjust > 0 then
+            table.insert(lines, string.format("Косяки (-%d)", penaltyAdjust))
+        else
+            table.insert(lines, "Косяки: " .. penaltyNote)
+        end
+    end
+
+    if bonusNote ~= "" or bonusAdjust > 0 then
+        if penaltyNote == "" and penaltyAdjust == 0 then
+            table.insert(lines, "")
+        end
+
+        if bonusNote ~= "" and bonusAdjust > 0 then
+            table.insert(lines, string.format("Плюсики (+%d): %s", bonusAdjust, bonusNote))
+        elseif bonusAdjust > 0 then
+            table.insert(lines, string.format("Плюсики (+%d)", bonusAdjust))
+        else
+            table.insert(lines, "Плюсики: " .. bonusNote)
+        end
+    end
+
+    return table.concat(lines, "\n")
+end
+
+function addon:TriggerButtonClick(button)
+    local onClick
+    local ok
+
+    if not button then
+        return
+    end
+
+    if button.Click then
+        ok = pcall(function()
+            button:Click()
+        end)
+
+        if ok then
+            return
+        end
+    end
+
+    if button.GetScript then
+        ok, onClick = pcall(function()
+            return button:GetScript("OnClick")
+        end)
+
+        if not ok then
+            onClick = nil
+        end
+    end
+
+    if onClick then
+        onClick(button)
+    end
+end
+
+function addon:ApplySendMailMoneyFields(copper)
+    local gold = math.floor(copper / 10000)
+    local silver = math.floor((copper % 10000) / 100)
+    local bronze = copper % 100
+
+    if MoneyInputFrame_SetCopper and SendMailMoney then
+        MoneyInputFrame_SetCopper(SendMailMoney, copper)
+    end
+
+    if SetSendMailMoney then
+        SetSendMailMoney(copper)
+    end
+
+    if SendMailMoney and SendMailMoney.gold and SendMailMoney.silver and SendMailMoney.copper then
+        SendMailMoney.gold:SetText(gold > 0 and tostring(gold) or "")
+        SendMailMoney.silver:SetText((gold > 0 or silver > 0) and tostring(silver) or "")
+        SendMailMoney.copper:SetText((gold > 0 or silver > 0 or bronze > 0) and tostring(bronze) or "")
+    end
+
+    if SendMailMoneyGold and SendMailMoneySilver and SendMailMoneyCopper then
+        SendMailMoneyGold:SetText(gold > 0 and tostring(gold) or "")
+        SendMailMoneySilver:SetText((gold > 0 or silver > 0) and tostring(silver) or "")
+        SendMailMoneyCopper:SetText((gold > 0 or silver > 0 or bronze > 0) and tostring(bronze) or "")
+    end
+end
+
+function addon:HideSendMailCostDisplay()
+    local frameNames = {
+        "SendMailCostMoneyFrame",
+        "SendMailCostMoney",
+    }
+    local textNames = {
+        "SendMailCostMoneyFrameText",
+        "SendMailCostMoneyText",
+    }
+    local index
+    local frame
+    local text
+
+    for index = 1, table.getn(frameNames) do
+        frame = _G[frameNames[index]]
+
+        if frame and frame.Hide then
+            frame:Hide()
+        end
+    end
+
+    for index = 1, table.getn(textNames) do
+        text = _G[textNames[index]]
+
+        if text and text.SetText then
+            text:SetText("")
+        end
+
+        if text and text.Hide then
+            text:Hide()
+        end
+    end
+end
+
 function addon:PrepareNextMailEntry(quiet)
     local state = self:GetMailPayoutState()
     local entry
     local copper
-    local gold
-    local silver
-    local bronze
+    local bodyText
 
     if not state.active then
         return false
@@ -1135,6 +2638,12 @@ function addon:PrepareNextMailEntry(quiet)
         SendMailSubjectEditBox:SetText("GoldBid GDKP выплата")
     end
 
+    bodyText = self:BuildMailPayoutBody(entry)
+
+    if SendMailBodyEditBox and SendMailBodyEditBox.SetText then
+        SendMailBodyEditBox:SetText(bodyText)
+    end
+
     copper = math.max(0, floorGold(entry.amount) * 10000)
     gold = math.floor(copper / 10000)
     silver = math.floor((copper % 10000) / 100)
@@ -1144,6 +2653,7 @@ function addon:PrepareNextMailEntry(quiet)
         if SendMailCODButton.SetChecked then
             SendMailCODButton:SetChecked(false)
         end
+        self:TriggerButtonClick(SendMailCODButton)
     end
 
     if SetSendMailCOD then
@@ -1156,6 +2666,7 @@ function addon:PrepareNextMailEntry(quiet)
         if SendMailMoneyButton.SetChecked then
             SendMailMoneyButton:SetChecked(true)
         end
+        self:TriggerButtonClick(SendMailMoneyButton)
     end
 
     if SendMailMoney and SendMailMoney.Show then
@@ -1166,37 +2677,14 @@ function addon:PrepareNextMailEntry(quiet)
         SendMailCOD:Hide()
     end
 
-    if SetSendMailMoney then
-        SetSendMailMoney(copper)
-    elseif SendMailMoneyGold and SendMailMoneySilver and SendMailMoneyCopper then
-        SendMailMoneyGold:SetText(tostring(gold))
-        SendMailMoneySilver:SetText(tostring(silver))
-        SendMailMoneyCopper:SetText(tostring(bronze))
-
-        local h = SendMailMoneyGold:GetScript("OnTextChanged")
-        if h then h(SendMailMoneyGold, true) end
-        h = SendMailMoneySilver:GetScript("OnTextChanged")
-        if h then h(SendMailMoneySilver, true) end
-        h = SendMailMoneyCopper:GetScript("OnTextChanged")
-        if h then h(SendMailMoneyCopper, true) end
-    elseif MoneyInputFrame_SetCopper and SendMailMoney then
-        MoneyInputFrame_SetCopper(SendMailMoney, copper)
-    elseif SendMailMoney and SendMailMoney.gold and SendMailMoney.silver and SendMailMoney.copper then
-        SendMailMoney.gold:SetText(tostring(gold))
-        SendMailMoney.silver:SetText(tostring(silver))
-        SendMailMoney.copper:SetText(tostring(bronze))
-
-        local h = SendMailMoney.gold:GetScript("OnTextChanged")
-        if h then h(SendMailMoney.gold, true) end
-        h = SendMailMoney.silver:GetScript("OnTextChanged")
-        if h then h(SendMailMoney.silver, true) end
-        h = SendMailMoney.copper:GetScript("OnTextChanged")
-        if h then h(SendMailMoney.copper, true) end
-    end
+    self:ApplySendMailMoneyFields(copper)
 
     if SendMailFrame_Update then
         SendMailFrame_Update()
     end
+
+    self:ApplySendMailMoneyFields(copper)
+    self:HideSendMailCostDisplay()
 
     if not quiet then
         self:Print(string.format(
@@ -1224,6 +2712,10 @@ function addon:StartMailPayout(autoFromMailShow)
             self:Print("Почтовую раздачу запускает только мастер лутер.")
         end
         return false
+    end
+
+    if self.CommitSplitViewEdits then
+        self:CommitSplitViewEdits()
     end
 
     if not state.active then
@@ -1261,9 +2753,18 @@ end
 function addon:HandleMailSendSuccess()
     local state = self:GetMailPayoutState()
     local entry = state.queue[state.index]
+    local splitEntry
 
     if not state.active then
         return
+    end
+
+    if entry and GoldBidDB and GoldBidDB.split and GoldBidDB.split.entries then
+        splitEntry = self:EnsureSplitEntry(entry.name)
+
+        if splitEntry then
+            splitEntry.sentAmount = floorGold(entry.amount or 0)
+        end
     end
 
     if entry then
@@ -1312,16 +2813,25 @@ function addon:ResetAuction()
         id = nil,
         itemLink = nil,
         itemName = nil,
-        minBid = 0,
-        increment = 0,
-        duration = 60,
+        minBid = self:GetDefaultAuctionMinBid(),
+        increment = self:GetDefaultAuctionIncrement(),
+        duration = self:GetDefaultAuctionDuration(),
         leader = nil,
         bids = {},
         passes = {},
         startedAt = nil,
         endsAt = nil,
         status = "idle",
+        mode = "goldbid",
+        rerollPlayers = {},
+        rerollRound = 0,
     }
+    self.skippedAuctionId = nil
+    self.pendingSkipAuctionId = nil
+
+    if self.frame then
+        self.frame.idleDefaultsApplied = false
+    end
 end
 
 function addon:EnsureAuctionState()
@@ -1334,20 +2844,24 @@ function addon:EnsureAuctionState()
     self.currentAuction.passes = self.currentAuction.passes or {}
 
     if self.currentAuction.minBid == nil then
-        self.currentAuction.minBid = 0
+        self.currentAuction.minBid = self:GetDefaultAuctionMinBid()
     end
 
     if self.currentAuction.increment == nil then
-        self.currentAuction.increment = 0
+        self.currentAuction.increment = self:GetDefaultAuctionIncrement()
     end
 
     if self.currentAuction.duration == nil then
-        self.currentAuction.duration = 60
+        self.currentAuction.duration = self:GetDefaultAuctionDuration()
     end
 
     if self.currentAuction.status == nil then
         self.currentAuction.status = "idle"
     end
+
+    self.currentAuction.mode = normalizeAuctionMode(self.currentAuction.mode)
+    self.currentAuction.rerollPlayers = self.currentAuction.rerollPlayers or {}
+    self.currentAuction.rerollRound = safenum(self.currentAuction.rerollRound, 0)
 end
 
 function addon:ResetAllData(skipBroadcast)
@@ -1365,7 +2879,7 @@ function addon:ResetAllData(skipBroadcast)
     }
 
     GoldBidDB.split = {
-        leaderSharePercent = splitSettings.leaderSharePercent or 20,
+        leaderSharePercent = 0,
         substitutePercent = splitSettings.substitutePercent or 100,
         entries = {},
         lastComputed = nil,
@@ -1580,6 +3094,104 @@ function addon:GetSortedBids()
     return rows
 end
 
+function addon:GetRollTiePlayers()
+    local topAmount
+    local tiedNames = {}
+    local rows = self:GetSortedBids()
+    local index
+
+    if normalizeAuctionMode(self.currentAuction and self.currentAuction.mode) ~= "roll" then
+        return nil, tiedNames
+    end
+
+    topAmount = rows[1] and rows[1].amount or nil
+
+    if not topAmount then
+        return nil, tiedNames
+    end
+
+    for index = 1, table.getn(rows) do
+        if rows[index].amount ~= topAmount then
+            break
+        end
+
+        table.insert(tiedNames, rows[index].name)
+    end
+
+    return topAmount, tiedNames
+end
+
+function addon:IsRollRerollActive()
+    self:EnsureAuctionState()
+    return normalizeAuctionMode(self.currentAuction.mode) == "roll"
+        and self.currentAuction.rerollPlayers
+        and next(self.currentAuction.rerollPlayers) ~= nil
+end
+
+function addon:IsPlayerEligibleForCurrentRoll(name)
+    local normalizedName = normalizeName(name)
+
+    if not normalizedName then
+        return false
+    end
+
+    if not self:IsRollRerollActive() then
+        return true
+    end
+
+    return self.currentAuction.rerollPlayers[normalizedName] == true
+end
+
+function addon:BuildRerollAnnouncement(players, topRoll)
+    local text = table.concat(players, ", ")
+
+    if topRoll and topRoll > 0 then
+        return string.format("Ничья по /roll (%d): %s. Переролл между ними, /roll 1-100.", topRoll, text)
+    end
+
+    return string.format("Ничья по /roll: %s. Переролл между ними, /roll 1-100.", text)
+end
+
+function addon:AnnounceRollReroll(players, topRoll)
+    local channel = self:GetDistributionChannel()
+    local message = self:BuildRerollAnnouncement(players, topRoll)
+
+    self:Print(message)
+
+    if channel then
+        SendChatMessage(message, channel)
+    end
+end
+
+function addon:StartRollReroll(players, topRoll)
+    local index
+
+    if normalizeAuctionMode(self.currentAuction.mode) ~= "roll" then
+        return false
+    end
+
+    self.currentAuction.rerollRound = safenum(self.currentAuction.rerollRound, 0) + 1
+    self.currentAuction.startedAt = time()
+    self.currentAuction.endsAt = self.currentAuction.startedAt + math.max(10, safenum(self.currentAuction.duration, 20))
+    self.currentAuction.status = "running"
+    self.currentAuction.rerollPlayers = {}
+
+    for index = 1, table.getn(players) do
+        self.currentAuction.rerollPlayers[normalizeName(players[index])] = true
+    end
+
+    self:WipeTable(self.currentAuction.bids)
+    self:WipeTable(self.currentAuction.passes)
+    self:AnnounceRollReroll(players, topRoll)
+
+    if self.RefreshMainWindow then
+        self:RefreshMainWindow()
+    end
+
+    self:BroadcastState()
+    return true
+end
+
 function addon:GetSortedPasses()
     local rows = {}
     local name
@@ -1609,6 +3221,10 @@ function addon:CanBid(amount, bidder)
     local _, topAmount = self:GetHighestBid()
     local minimum = auction.minBid
 
+    if normalizeAuctionMode(auction.mode) == "roll" then
+        return false, "В режиме Roll используйте кнопку Roll или /roll 1-100."
+    end
+
     if topAmount and topAmount > 0 then
         minimum = topAmount + math.max(auction.increment, 1)
     end
@@ -1622,7 +3238,7 @@ function addon:CanBid(amount, bidder)
     end
 
     if amount < minimum then
-        return false, "Минимальная ставка: " .. tostring(minimum) .. "g."
+        return false, "Минимальная ставка: " .. formatGoldAmount(minimum) .. "."
     end
 
     return true
@@ -1640,6 +3256,7 @@ end
 function addon:ExtendAuctionForLateBid()
     local auction
     local timeLeft
+    local newEndsAt
 
     self:EnsureAuctionState()
     auction = self.currentAuction
@@ -1648,47 +3265,77 @@ function addon:ExtendAuctionForLateBid()
         return false
     end
 
-    timeLeft = self:GetTimeLeft()
-    if timeLeft > 15 then
+    if normalizeAuctionMode(auction.mode) ~= "goldbid" then
         return false
     end
 
-    auction.endsAt = auction.endsAt + 10
-    auction.duration = safenum(auction.duration, 0) + 10
+    timeLeft = self:GetTimeLeft()
+    if timeLeft >= 15 then
+        return false
+    end
+
+    newEndsAt = time() + 15
+    auction.endsAt = newEndsAt
+
+    if auction.startedAt then
+        auction.duration = math.max(safenum(auction.duration, 0), newEndsAt - auction.startedAt)
+    else
+        auction.duration = 15
+    end
+
     return true
 end
 
 function addon:RecordPass(bidder)
     self:EnsureAuctionState()
+
+    if normalizeAuctionMode(self.currentAuction.mode) == "roll" and not self:IsPlayerEligibleForCurrentRoll(bidder) then
+        return false
+    end
+
+    if normalizeAuctionMode(self.currentAuction.mode) == "roll" and self.currentAuction.bids[bidder] then
+        return false
+    end
+
+    if self.currentAuction.passes[bidder] then
+        return false
+    end
+
     self.currentAuction.passes[bidder] = true
 
     if self.RefreshMainWindow then
         self:RefreshMainWindow()
     end
+
+    return true
 end
 
-function addon:OpenAuction(itemLink, minBid, increment, duration, auctionId, leaderName)
+function addon:OpenAuction(itemLink, minBid, increment, duration, auctionId, leaderName, mode)
     local itemName = itemLink
-    local activeDuration = safenum(duration, 60)
+    local activeDuration = safenum(duration, self:GetDefaultAuctionDuration())
+    local auctionMode = normalizeAuctionMode(mode or self:GetSelectedAuctionMode())
 
     if GetItemInfo then
         itemName = GetItemInfo(itemLink) or itemLink
     end
 
     if activeDuration <= 0 then
-        activeDuration = 60
+        activeDuration = self:GetDefaultAuctionDuration()
     end
 
     self.currentAuction.id = auctionId or self:CreateAuctionId()
     self.currentAuction.itemLink = itemLink
     self.currentAuction.itemName = itemName
-    self.currentAuction.minBid = safenum(minBid, 0)
-    self.currentAuction.increment = safenum(increment, 0)
+    self.currentAuction.minBid = safenum(minBid, self:GetDefaultAuctionMinBid())
+    self.currentAuction.increment = safenum(increment, self:GetDefaultAuctionIncrement())
     self.currentAuction.duration = activeDuration
     self.currentAuction.leader = normalizeName(leaderName) or self:GetLeaderName()
     self.currentAuction.startedAt = time()
     self.currentAuction.endsAt = self.currentAuction.startedAt + activeDuration
     self.currentAuction.status = "running"
+    self.currentAuction.mode = auctionMode
+    self.currentAuction.rerollRound = 0
+    self:WipeTable(self.currentAuction.rerollPlayers)
     self:WipeTable(self.currentAuction.bids)
     self:WipeTable(self.currentAuction.passes)
 
@@ -1709,8 +3356,28 @@ function addon:GetTimeLeft()
     return math.max(0, self.currentAuction.endsAt - time())
 end
 
+function addon:HasRecordedSaleForAuction(auctionId)
+    local sales
+    local index
+
+    if not auctionId or auctionId == "" or not GoldBidDB or not GoldBidDB.ledger then
+        return false
+    end
+
+    sales = GoldBidDB.ledger.sales or {}
+
+    for index = 1, table.getn(sales) do
+        if tostring(sales[index].auctionId or "") == tostring(auctionId) then
+            return true
+        end
+    end
+
+    return false
+end
+
 function addon:CloseAuction(winner, amount)
     local auction = self.currentAuction
+    local mode = normalizeAuctionMode(auction.mode)
 
     if not auction.id or auction.status == "ended" then
         return
@@ -1718,20 +3385,29 @@ function addon:CloseAuction(winner, amount)
 
     auction.status = "ended"
 
-    if winner and amount and amount > 0 then
-        table.insert(GoldBidDB.ledger.sales, {
-            timestamp = date("%Y-%m-%d %H:%M:%S"),
-            itemLink = auction.itemLink,
-            winner = winner,
-            amount = amount,
-            auctionId = auction.id,
-        })
+    if mode == "goldbid" and winner and amount and amount > 0 then
+        if not self:HasRecordedSaleForAuction(auction.id) then
+            table.insert(GoldBidDB.ledger.sales, {
+                timestamp = date("%Y-%m-%d %H:%M:%S"),
+                itemLink = auction.itemLink,
+                winner = winner,
+                guildName = self:GetGuildNameForPlayer(winner),
+                amount = amount,
+                auctionId = auction.id,
+            })
 
-        GoldBidDB.ledger.pot = (GoldBidDB.ledger.pot or 0) + amount
-        self:Print(string.format("%s выиграл %s за %dg.", tostring(winner), tostring(auction.itemLink or auction.itemName or "лот"), amount))
+            GoldBidDB.ledger.pot = (GoldBidDB.ledger.pot or 0) + amount
+            self:Print(string.format("%s выиграл %s за %dg.", tostring(winner), tostring(auction.itemLink or auction.itemName or "лот"), amount))
+        end
+    elseif mode == "roll" and winner and amount and amount > 0 then
+        self:Print(string.format("%s выиграл %s по роллу %d.", tostring(winner), tostring(auction.itemLink or auction.itemName or "лот"), amount))
+    elseif mode == "roll" then
+        self:Print(string.format("Ролл на %s завершён без бросков.", tostring(auction.itemLink or auction.itemName or "лот")))
     else
         self:Print(string.format("Торги по %s завершены без ставок.", tostring(auction.itemLink or auction.itemName or "лот")))
     end
+
+    self:ResetAuction()
 
     if self.RefreshMainWindow then
         self:RefreshMainWindow()
@@ -1759,6 +3435,9 @@ function addon:BroadcastState(target, forceSend)
         self:EncodeBidList(),
         self:EncodePassList(),
         GoldBidDB.ledger.pot or 0,
+        normalizeAuctionMode(auction.mode),
+        self:EncodeNameSet(auction.rerollPlayers),
+        auction.rerollRound or 0,
     }, target and "WHISPER" or self:GetDistributionChannel(), target)
 end
 
@@ -1781,7 +3460,7 @@ function addon:ApplyState(fields, sender)
     local itemLink = fields[3]
     local minBid = safenum(fields[4], 0)
     local increment = safenum(fields[5], 0)
-    local duration = safenum(fields[6], 60)
+    local duration = safenum(fields[6], self:GetDefaultAuctionDuration())
     local startedAt = safenum(fields[7], 0)
     local endsAt = safenum(fields[8], 0)
     local leaderName = normalizeName(fields[9]) or normalizeName(sender)
@@ -1789,6 +3468,9 @@ function addon:ApplyState(fields, sender)
     local bids = self:DecodeBidList(fields[11] or "")
     local passes = self:DecodePassList(fields[12] or "")
     local pot = safenum(fields[13], GoldBidDB.ledger.pot or 0)
+    local mode = normalizeAuctionMode(fields[14])
+    local rerollPlayers = self:DecodeNameSet(fields[15] or "")
+    local rerollRound = safenum(fields[16], 0)
 
     self:EnsureAuctionState()
 
@@ -1815,6 +3497,9 @@ function addon:ApplyState(fields, sender)
         self.currentAuction.endsAt = endsAt > 0 and endsAt or (status == "running" and (time() + duration) or nil)
         self.currentAuction.leader = leaderName
         self.currentAuction.status = status
+        self.currentAuction.mode = mode
+        self.currentAuction.rerollPlayers = rerollPlayers
+        self.currentAuction.rerollRound = rerollRound
         self.currentAuction.bids = bids
         self.currentAuction.passes = passes
     else
@@ -1849,6 +3534,118 @@ function addon:ComputePayout()
     end
 
     return GoldBidDB.ledger.payout
+end
+
+function addon:RemoveSaleAt(index)
+    self:EnsureDB()
+    local sales = GoldBidDB.ledger.sales or {}
+    local sale = sales[index]
+    local amount
+
+    if not sale then
+        return false
+    end
+
+    amount = math.max(0, floorGold(safenum(sale.amount, 0)))
+    table.remove(sales, index)
+    GoldBidDB.ledger.sales = sales
+    GoldBidDB.ledger.pot = math.max(0, floorGold(safenum(GoldBidDB.ledger.pot, 0) - amount))
+
+    if self.ResetMailPayoutState then
+        self:ResetMailPayoutState(true)
+    end
+
+    if GoldBidDB.ledger.payout then
+        self:ComputePayout()
+    elseif self.RefreshMainWindow then
+        self:RefreshMainWindow()
+    end
+
+    if self:IsPlayerController() and (UnitInRaid("player") or UnitInParty("player")) then
+        self:BroadcastState(nil, true)
+
+        if GoldBidDB.ledger.payout then
+            self:SendPayoutState()
+        end
+    end
+
+    self:Print(string.format(
+        "Удалён лот из сводки: %s, %s, %dg.",
+        tostring(sale.itemLink or sale.itemName or "Неизвестный лот"),
+        tostring(sale.winner or "-"),
+        amount
+    ))
+
+    return true
+end
+
+function addon:BuildSpendingSummary()
+    self:EnsureDB()
+    local sales = GoldBidDB.ledger.sales or {}
+    local totalsByPlayer = {}
+    local rows = {}
+    local totalSpent = 0
+    local totalLots = 0
+    local buyerCount = 0
+    local index
+    local winner
+    local amount
+    local entry
+
+    for index = 1, table.getn(sales) do
+        winner = normalizeName(sales[index].winner) or tostring(sales[index].winner or "")
+        amount = math.max(0, floorGold(safenum(sales[index].amount, 0)))
+
+        if winner and winner ~= "" and amount > 0 then
+            local guildName = tostring(sales[index].guildName or self:GetGuildNameForPlayer(winner) or "")
+
+            if guildName ~= "" and (sales[index].guildName == nil or sales[index].guildName == "") then
+                sales[index].guildName = guildName
+            end
+
+            entry = totalsByPlayer[winner]
+
+            if not entry then
+                entry = {
+                    name = winner,
+                    guildName = guildName,
+                    total = 0,
+                    lots = 0,
+                }
+                totalsByPlayer[winner] = entry
+            end
+
+            if guildName ~= "" then
+                entry.guildName = guildName
+            end
+
+            entry.total = entry.total + amount
+            entry.lots = entry.lots + 1
+            totalSpent = totalSpent + amount
+            totalLots = totalLots + 1
+        end
+    end
+
+    for winner in pairs(totalsByPlayer) do
+        table.insert(rows, totalsByPlayer[winner])
+    end
+
+    table.sort(rows, function(left, right)
+        if left.total == right.total then
+            return tostring(left.name or "") < tostring(right.name or "")
+        end
+
+        return left.total > right.total
+    end)
+
+    buyerCount = table.getn(rows)
+
+    return {
+        rows = rows,
+        totalSpent = totalSpent,
+        totalLots = totalLots,
+        buyerCount = buyerCount,
+    }
 end
 
 function addon:BuildExportText()
@@ -1890,7 +3687,7 @@ function addon:BuildExportText()
         "Версия: " .. cleanCell(self.version),
         "Лидер: " .. cleanCell(self:GetLeaderName() or "неизвестно"),
         "Дата: " .. date("%Y-%m-%d %H:%M:%S"),
-        "Пот: " .. tostring(floorGold(GoldBidDB.ledger.pot or 0)) .. "g",
+        "Пот: " .. formatGoldAmount(GoldBidDB.ledger.pot or 0),
         "",
         "Продажи",
     }
@@ -1908,11 +3705,11 @@ function addon:BuildExportText()
             local sale = sales[index]
 
             table.insert(lines, string.format(
-                "| %d | %s | %s | %dg |",
+                "| %d | %s | %s | %s |",
                 index,
                 cleanCell(sale.itemLink or "?"),
                 cleanCell(sale.winner or "?"),
-                floorGold(sale.amount or 0)
+                formatGoldAmount(sale.amount or 0)
             ))
         end
     end
@@ -1932,13 +3729,13 @@ function addon:BuildExportText()
         table.insert(lines, "")
         table.insert(lines, "Детальная делёжка")
         table.insert(lines, string.format("Основа: %d | Замены: %d", split.mainCount or 0, split.substituteCount or 0))
-        pushTableHeader(lines, { "#", "Игрок", "Спек", "Роль", "%", "Долг", "К выплате", "Примечание" })
+        pushTableHeader(lines, { "#", "Игрок", "Спек", "Роль", "%", "Долг", "К выплате", "Косяки", "Плюсики" })
 
         for index = 1, table.getn(split.rows) do
             local row = split.rows[index]
 
             table.insert(lines, string.format(
-                "| %d | %s | %s | %s | %d | %dg | %dg | %s |",
+                "| %d | %s | %s | %s | %d | %dg | %dg | %s | %s |",
                 index,
                 cleanCell(row.name or "?"),
                 cleanCell(row.spec or ""),
@@ -1946,7 +3743,8 @@ function addon:BuildExportText()
                 floorGold(row.percent or 0),
                 floorGold(row.debt or 0),
                 floorGold(row.net or 0),
-                cleanCell(row.note or "")
+                cleanCell(row.penaltyNote or ""),
+                cleanCell(row.bonusNote or "")
             ))
         end
     end
@@ -1968,6 +3766,10 @@ function addon:HandleBidMessage(fields, sender)
     end
 
     if not self:IsAuctionActive() or auctionId ~= self.currentAuction.id then
+        return
+    end
+
+    if normalizeAuctionMode(self.currentAuction.mode) == "roll" then
         return
     end
 
@@ -1997,8 +3799,58 @@ function addon:HandlePassMessage(fields, sender)
         return
     end
 
-    self:RecordPass(bidder)
-    self:SendCommand("PASSACK", { auctionId, bidder }, self:GetDistributionChannel())
+    if self:RecordPass(bidder) then
+        self:SendCommand("PASSACK", { auctionId, bidder }, self:GetDistributionChannel())
+    end
+end
+
+function addon:HandleRollSystemMessage(message)
+    local name
+    local roll
+    local low
+    local high
+    local normalizedName
+
+    if not self:IsPlayerController() or not self:IsAuctionActive() then
+        return
+    end
+
+    if normalizeAuctionMode(self.currentAuction.mode) ~= "roll" then
+        return
+    end
+
+    name, roll, low, high = string.match(tostring(message or ""), getRandomRollPattern())
+    normalizedName = normalizeName(name)
+    roll = safenum(roll, 0)
+    low = safenum(low, 0)
+    high = safenum(high, 0)
+
+    if not normalizedName or low ~= 1 or high ~= 100 or roll <= 0 then
+        return
+    end
+
+    if (UnitInRaid("player") or UnitInParty("player")) and not self:IsRosterMember(normalizedName) then
+        return
+    end
+
+    if not self:IsPlayerEligibleForCurrentRoll(normalizedName) then
+        return
+    end
+
+    if self.currentAuction.passes and self.currentAuction.passes[normalizedName] then
+        return
+    end
+
+    if self.currentAuction.bids and self.currentAuction.bids[normalizedName] ~= nil then
+        return
+    end
+
+    self:ApplyAcceptedBid(normalizedName, roll)
+    self:SendCommand("ACCEPT", { self.currentAuction.id, normalizedName, roll }, self:GetDistributionChannel())
+
+    if self:ExtendAuctionForLateBid() then
+        self:BroadcastState()
+    end
 end
 
 function addon:HandleAddonMessage(prefix, message, channel, sender)
@@ -2062,7 +3914,7 @@ function addon:HandleAddonMessage(prefix, message, channel, sender)
 
     if command == "START" then
         if self:AcceptControllerSender(sender) then
-            self:OpenAuction(fields[3], fields[4], fields[5], fields[6], fields[2], sender)
+            self:OpenAuction(fields[3], fields[4], fields[5], fields[6], fields[2], sender, fields[7])
         end
         return
     end
@@ -2112,6 +3964,8 @@ function addon:HandleAddonMessage(prefix, message, channel, sender)
 end
 
 function addon:StartAuction(itemLink, minBid, increment, duration)
+    local mode
+
     if not self:IsPlayerController() then
         self:Print("Только мастер лутер может начать аукцион.")
         return
@@ -2122,19 +3976,25 @@ function addon:StartAuction(itemLink, minBid, increment, duration)
         return
     end
 
-    self:OpenAuction(itemLink, minBid, increment, duration, self:CreateAuctionId(), self:GetPlayerName())
+    mode = self:GetSelectedAuctionMode()
+    self:OpenAuction(itemLink, minBid, increment, duration, self:CreateAuctionId(), self:GetPlayerName(), mode)
     self:SendCommand("START", {
         self.currentAuction.id,
         self.currentAuction.itemLink,
         self.currentAuction.minBid,
         self.currentAuction.increment,
         self.currentAuction.duration,
+        mode,
     }, self:GetDistributionChannel())
     self:BroadcastState()
 end
 
 function addon:EndAuction()
     local winner, amount
+    local auctionId
+    local activeAuctionId
+    local topRoll, tiedPlayers
+    local ok, err
 
     if not self:IsPlayerController() then
         self:Print("Только мастер лутер может завершить аукцион.")
@@ -2146,20 +4006,68 @@ function addon:EndAuction()
         return
     end
 
-    winner, amount = self:GetHighestBid()
+    activeAuctionId = self.currentAuction.id
 
-    self:CloseAuction(winner, amount)
-    self:SendCommand("END", {
-        self.currentAuction.id,
-        winner or "",
-        amount or 0,
-    }, self:GetDistributionChannel())
-    self:BroadcastState()
+    if self.endingAuctionId and self.endingAuctionId == activeAuctionId then
+        return
+    end
+
+    self.endingAuctionId = activeAuctionId
+    ok, err = pcall(function()
+        if normalizeAuctionMode(self.currentAuction.mode) == "roll" then
+            topRoll, tiedPlayers = self:GetRollTiePlayers()
+
+            if table.getn(tiedPlayers) > 1 then
+                self:StartRollReroll(tiedPlayers, topRoll)
+                return
+            end
+        end
+
+        winner, amount = self:GetHighestBid()
+        auctionId = self.currentAuction.id
+
+        self:CloseAuction(winner, amount)
+        self:SendCommand("END", {
+            auctionId,
+            winner or "",
+            amount or 0,
+        }, self:GetDistributionChannel())
+        self:BroadcastState()
+    end)
+    self.endingAuctionId = nil
+
+    if not ok then
+        error(err)
+    end
 end
 
 function addon:SubmitBid(amount)
+    local playerName
+
     if not self:IsAuctionActive() then
         self:Print("Нет активного аукциона.")
+        return
+    end
+
+    if normalizeAuctionMode(self.currentAuction.mode) == "roll" then
+        playerName = self:GetPlayerName()
+
+        if not self:IsPlayerEligibleForCurrentRoll(playerName) then
+            self:Print("Сейчас переролл только для игроков с одинаковым максимальным роллом.")
+            return
+        end
+
+        if self.currentAuction.passes and self.currentAuction.passes[playerName] then
+            self:Print("Вы уже нажали ПАС и больше не участвуете в розыгрыше.")
+            return
+        end
+
+        if self.currentAuction.bids and self.currentAuction.bids[playerName] ~= nil then
+            self:Print("Ваш ролл уже засчитан.")
+            return
+        end
+
+        RandomRoll(1, 100)
         return
     end
 
@@ -2174,8 +4082,17 @@ function addon:SubmitBid(amount)
 end
 
 function addon:SubmitPass()
+    local playerName
+
     if not self:IsAuctionActive() then
         self:Print("Нет активного аукциона.")
+        return
+    end
+
+    playerName = self:GetPlayerName()
+
+    if normalizeAuctionMode(self.currentAuction.mode) == "roll" and self.currentAuction.bids and self.currentAuction.bids[playerName] ~= nil then
+        self:Print("Ваш ролл уже засчитан.")
         return
     end
 
@@ -2184,6 +4101,13 @@ end
 
 function addon:SetPendingItem(itemLink)
     self.pendingItemLink = itemLink
+
+    if self.frame then
+        self.frame.lastAutoMinBidItemLink = nil
+        self.frame.idleDefaultsApplied = false
+        self.frame.minBidManualOverride = false
+        self.frame.incrementManualOverride = false
+    end
 
     if self.RefreshMainWindow then
         self:RefreshMainWindow()
@@ -2196,6 +4120,10 @@ function addon:RequestSync()
 end
 
 frame:RegisterEvent("CHAT_MSG_ADDON")
+frame:RegisterEvent("CHAT_MSG_LOOT")
+frame:RegisterEvent("CHAT_MSG_SYSTEM")
+frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+frame:RegisterEvent("LOOT_OPENED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("PARTY_LOOT_METHOD_CHANGED")
 frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
@@ -2210,6 +4138,7 @@ frame:RegisterEvent("MAIL_FAILED")
 frame:SetScript("OnUpdate", function(_, elapsed)
     addon.updateThrottle = (addon.updateThrottle or 0) + elapsed
     addon.syncThrottle = (addon.syncThrottle or 0) + elapsed
+    addon.lootWarningThrottle = (addon.lootWarningThrottle or 0) + elapsed
 
     if addon.updateThrottle < 0.2 then
         if addon.syncThrottle < 2 then
@@ -2246,6 +4175,12 @@ frame:SetScript("OnUpdate", function(_, elapsed)
         end
     end
 
+    if addon.lootWarningThrottle >= 5 then
+        addon.lootWarningThrottle = 0
+        addon:CheckLootExpiryWarnings()
+    end
+
+    addon:ProcessPendingLootWindowRetry()
     addon:ProcessInspectQueue()
 end)
 
@@ -2255,14 +4190,34 @@ frame:SetScript("OnEvent", function(_, event, ...)
         return
     end
 
+    if event == "CHAT_MSG_LOOT" then
+        addon:HandleLootChatMessage(...)
+        return
+    end
+
+    if event == "CHAT_MSG_SYSTEM" then
+        addon:HandleRollSystemMessage(...)
+        return
+    end
+
+    if event == "COMBAT_LOG_EVENT_UNFILTERED" then
+        addon:HandleCombatLogEvent(...)
+        return
+    end
+
+    if event == "LOOT_OPENED" then
+        addon:HandleLootOpened(...)
+        return
+    end
+
     if event == "INSPECT_TALENT_READY" then
         addon:HandleInspectTalentReady(...)
         return
     end
 
     if event == "MAIL_SHOW" then
-        if addon:IsPlayerController() then
-            addon:StartMailPayout(true)
+        if addon.RefreshMainWindow then
+            addon:RefreshMainWindow()
         end
         return
     end

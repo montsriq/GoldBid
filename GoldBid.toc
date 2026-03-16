@@ -1,5 +1,5 @@
 ## Interface: 30300
-## Title: GoldBid
+## Title: GoldBid by monstrik
 ## Author: Eva
 ## Version: 1.0
 ## Notes: GDKP bidding system

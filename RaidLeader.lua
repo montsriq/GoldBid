@@ -14,12 +14,12 @@ SlashCmdList["GOLDBID"] = function(message)
     rest = trim(rest)
 
     if command == "" then
-        addon:ShowMainWindow()
+        addon:ShowMainWindow(true)
         return
     end
 
     if command == "show" then
-        addon:ShowMainWindow()
+        addon:ShowMainWindow(true)
         addon:RefreshMainWindow()
         return
     end
@@ -36,7 +36,7 @@ SlashCmdList["GOLDBID"] = function(message)
         end
 
         addon:SetPendingItem(rest)
-        addon:ShowMainWindow()
+        addon:ShowMainWindow(true)
         return
     end
 
@@ -49,6 +49,19 @@ SlashCmdList["GOLDBID"] = function(message)
             tonumber(increment) or 10,
             tonumber(duration) or 20
         )
+        return
+    end
+
+    if command == "mode" then
+        rest = string.lower(rest or "")
+
+        if rest == "goldbid" or rest == "roll" then
+            addon:SetSelectedAuctionMode(rest)
+            addon:Print("Режим распределения: " .. addon:GetAuctionModeDisplayName(rest) .. ".")
+            return
+        end
+
+        addon:Print("Использование: /gbid mode goldbid|roll")
         return
     end
 
@@ -96,5 +109,5 @@ SlashCmdList["GOLDBID"] = function(message)
         return
     end
 
-    addon:Print("Команды: /gbid, /gbid show, /gbid settings, /gbid item [ссылка], /gbid start [мин] [шаг] [сек], /gbid bid [сумма], /gbid pass, /gbid end, /gbid sync, /gbid export, /gbid split, /gbid mail")
+    addon:Print("Команды: /gbid, /gbid show, /gbid settings, /gbid item [ссылка], /gbid mode goldbid|roll, /gbid start [мин] [шаг] [сек], /gbid bid [сумма], /gbid pass, /gbid end, /gbid sync, /gbid export, /gbid split, /gbid mail")
 end
