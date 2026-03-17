@@ -5,6 +5,8 @@ GoldBid.version = "2.0.0"
 local addon = GoldBid
 local frame = CreateFrame("Frame")
 local npcTypeFlag = COMBATLOG_OBJECT_TYPE_NPC or 0
+local DEFAULT_GUILD_SHARE_PERCENT = 10
+local DEFAULT_LEADER_SHARE_PERCENT = 10
 
 local function splitMessage(message)
     local parts = {}
@@ -89,6 +91,103 @@ end
 local function floorGold(value)
     value = tonumber(value) or 0
     return math.floor(value)
+end
+
+local function clampPercent(value, fallback, maxValue)
+    local percent = math.max(0, safenum(value, fallback or 0))
+
+    if maxValue ~= nil then
+        percent = math.min(percent, maxValue)
+    end
+
+    return percent
+end
+
+local function getEffectiveFixedSharePercents(splitSettings, leaderOverridePercent)
+    local guildPercent = clampPercent(splitSettings and splitSettings.guildSharePercent, DEFAULT_GUILD_SHARE_PERCENT, 100)
+    local leaderPercent = clampPercent(
+        leaderOverridePercent ~= nil and leaderOverridePercent or (splitSettings and splitSettings.leaderSharePercent),
+        DEFAULT_LEADER_SHARE_PERCENT,
+        math.max(0, 100 - guildPercent)
+    )
+
+    return guildPercent, leaderPercent, math.max(0, 100 - guildPercent - leaderPercent)
+end
+
+local function ensureSplitSettingsDefaults(splitSettings)
+    local normalizedRosterSnapshot = {}
+    local key
+    local value
+
+    if type(splitSettings) ~= "table" then
+        return
+    end
+
+    splitSettings.entries = splitSettings.entries or {}
+
+    if type(splitSettings.rosterSnapshot) ~= "table" then
+        splitSettings.rosterSnapshot = {}
+    end
+
+    for key, value in pairs(splitSettings.rosterSnapshot) do
+        local name
+
+        if type(key) == "number" then
+            name = normalizeName(value)
+        elseif value then
+            name = normalizeName(key)
+        end
+
+        if name then
+            normalizedRosterSnapshot[name] = true
+        end
+    end
+
+    splitSettings.rosterSnapshot = normalizedRosterSnapshot
+
+    if splitSettings.guildSharePercent == nil then
+        splitSettings.guildSharePercent = DEFAULT_GUILD_SHARE_PERCENT
+
+        if splitSettings.leaderSharePercent == nil or splitSettings.leaderSharePercent == 0 then
+            splitSettings.leaderSharePercent = DEFAULT_LEADER_SHARE_PERCENT
+        end
+
+        splitSettings.fixedSharesMigrated = true
+    elseif splitSettings.leaderSharePercent == nil then
+        splitSettings.leaderSharePercent = DEFAULT_LEADER_SHARE_PERCENT
+    end
+
+    if splitSettings.substitutePercent == nil then
+        splitSettings.substitutePercent = 100
+    end
+end
+
+local function buildSplitPayoutKey(totalPot, guildPercent, leaderPercent, distributablePot, baseShare, rows)
+    local parts = {
+        "pot=" .. tostring(floorGold(totalPot)),
+        "guild=" .. tostring(floorGold(guildPercent)),
+        "leader=" .. tostring(floorGold(leaderPercent)),
+        "pool=" .. tostring(floorGold(distributablePot)),
+        "base=" .. tostring(floorGold(baseShare)),
+    }
+    local index
+
+    for index = 1, table.getn(rows or {}) do
+        local row = rows[index]
+
+        parts[#parts + 1] = table.concat({
+            tostring(row and row.name or ""),
+            tostring(row and row.role or ""),
+            tostring(row and row.isLeader and 1 or 0),
+            tostring(row and row.isSubstitute and 1 or 0),
+            tostring(floorGold((row and row.percent) or 0)),
+            tostring(floorGold((row and row.debt) or 0)),
+            tostring(floorGold((row and row.gross) or 0)),
+            tostring(floorGold((row and row.net) or 0)),
+        }, ":")
+    end
+
+    return table.concat(parts, ";")
 end
 
 local function formatGroupedNumber(value)
@@ -258,8 +357,10 @@ function addon:CreateDefaultDB()
             entries = {},
         },
         split = {
-            leaderSharePercent = 0,
+            guildSharePercent = DEFAULT_GUILD_SHARE_PERCENT,
+            leaderSharePercent = DEFAULT_LEADER_SHARE_PERCENT,
             substitutePercent = 100,
+            rosterSnapshot = {},
             entries = {},
             lastComputed = nil,
         },
@@ -288,11 +389,7 @@ function addon:EnsureDB()
     GoldBidDB.loot = GoldBidDB.loot or {}
     GoldBidDB.loot.entries = GoldBidDB.loot.entries or {}
     GoldBidDB.split = GoldBidDB.split or {}
-    GoldBidDB.split.entries = GoldBidDB.split.entries or {}
-    GoldBidDB.split.leaderSharePercent = 0
-    if GoldBidDB.split.substitutePercent == nil then
-        GoldBidDB.split.substitutePercent = 100
-    end
+    ensureSplitSettingsDefaults(GoldBidDB.split)
     GoldBidDB.ui = GoldBidDB.ui or {}
     GoldBidDB.ui.minimap = GoldBidDB.ui.minimap or {}
     if GoldBidDB.ui.minimap.minimapPos == nil then
@@ -344,16 +441,162 @@ function addon:NormalizeLootEntry(entry)
     return entry
 end
 
+local MIN_TRACKED_LOOT_QUALITY = 4
+local ATLASLOOT_ADDON_SIGNATURE_NAMES = {
+    "AtlasLoot",
+    "AtlasLoot_OriginalWoW",
+    "AtlasLoot_BurningCrusade",
+    "AtlasLoot_Crafting",
+    "AtlasLoot_WorldEvents",
+    "AtlasLoot_WrathoftheLichKing",
+    "AtlasLoot_PVP",
+    "Atlasloot_Nozdor",
+}
+local ATLASLOOT_NON_BOSS_TABLE_MARKERS = {
+    "MENU",
+    "TRASH",
+    "PATTERN",
+    "KEY",
+    "QUEST",
+    "TOKEN",
+    "RUNE",
+    "FILTER",
+    "FALLBACK",
+    "CRAFT",
+    "PVP",
+    "REP",
+    "MOUNT",
+    "PET",
+}
+
+local function normalizeItemColorHex(value)
+    value = string.lower(tostring(value or ""))
+    return string.gsub(value, "^ff", "")
+end
+
+local function getItemQualityFromLink(itemLink)
+    local itemColor
+    local qualityIndex
+
+    if not itemLink or itemLink == "" then
+        return nil
+    end
+
+    if GetItemInfo then
+        local _, _, itemQuality = GetItemInfo(itemLink)
+
+        if itemQuality ~= nil then
+            return tonumber(itemQuality)
+        end
+    end
+
+    itemColor = string.match(tostring(itemLink), "|c[fF][fF]([0-9A-Fa-f]+)|Hitem:")
+
+    if not itemColor or type(ITEM_QUALITY_COLORS) ~= "table" then
+        return nil
+    end
+
+    itemColor = normalizeItemColorHex(itemColor)
+
+    for qualityIndex = 0, 7 do
+        local colorData = ITEM_QUALITY_COLORS[qualityIndex]
+
+        if colorData and normalizeItemColorHex(colorData.hex) == itemColor then
+            return qualityIndex
+        end
+    end
+
+    return nil
+end
+
+local function getItemIdFromLink(itemLink)
+    local itemId
+
+    if not itemLink or itemLink == "" then
+        return nil
+    end
+
+    itemId = tonumber(string.match(tostring(itemLink), "item:(%d+)"))
+
+    if itemId and itemId > 0 then
+        return itemId
+    end
+
+    return nil
+end
+
+local function getAtlasLootItemId(value)
+    local itemId
+
+    if type(value) == "number" then
+        if value > 0 then
+            return value
+        end
+
+        return nil
+    end
+
+    if type(value) ~= "string" then
+        return nil
+    end
+
+    itemId = tonumber(string.match(value, "item:(%d+)") or string.match(value, "^(%d+)$"))
+
+    if itemId and itemId > 0 then
+        return itemId
+    end
+
+    return nil
+end
+
+function addon:ShouldTrackLootItem(itemLink, quality)
+    local itemQuality = tonumber(quality)
+    local equipLoc = ""
+
+    if not itemLink or itemLink == "" then
+        return false
+    end
+
+    if GetItemInfo then
+        local _, _, infoQuality, _, _, _, _, _, infoEquipLoc = GetItemInfo(itemLink)
+
+        if infoQuality ~= nil then
+            itemQuality = tonumber(infoQuality)
+        end
+
+        equipLoc = tostring(infoEquipLoc or "")
+    end
+
+    if itemQuality == nil then
+        itemQuality = getItemQualityFromLink(itemLink)
+    end
+
+    if not itemQuality or itemQuality < MIN_TRACKED_LOOT_QUALITY then
+        return false
+    end
+
+    if IsEquippableItem and IsEquippableItem(itemLink) then
+        return true
+    end
+
+    return equipLoc ~= ""
+end
+
 function addon:GetLootEntries()
     self:EnsureLootDB()
     local entries = GoldBidDB.loot.entries
+    local filteredEntries = {}
     local index
 
     for index = 1, table.getn(entries) do
-        self:NormalizeLootEntry(entries[index])
+        local entry = self:NormalizeLootEntry(entries[index])
+
+        if entry and self:ShouldTrackLootItem(entry.itemLink) then
+            table.insert(filteredEntries, entry)
+        end
     end
 
-    return entries
+    return filteredEntries
 end
 
 function addon:GetLootTransferTimeLeft(entry)
@@ -386,6 +629,208 @@ function addon:FormatLootTimeLeft(seconds)
     end
 
     return string.format("%dм", minutes)
+end
+
+function addon:CanUseAtlasLootBossData()
+    return IsAddOnLoaded and IsAddOnLoaded("AtlasLoot") and type(_G.AtlasLoot_TableNames) == "table"
+end
+
+function addon:GetAtlasLootBossIndexSignature()
+    local parts = {}
+    local addonIndex
+    local tableCount = 0
+
+    if type(_G.AtlasLoot_Data) == "table" then
+        for _ in pairs(_G.AtlasLoot_Data) do
+            tableCount = tableCount + 1
+        end
+    end
+
+    table.insert(parts, tostring(tableCount))
+
+    for addonIndex = 1, table.getn(ATLASLOOT_ADDON_SIGNATURE_NAMES) do
+        table.insert(parts, tostring((IsAddOnLoaded and IsAddOnLoaded(ATLASLOOT_ADDON_SIGNATURE_NAMES[addonIndex])) and 1 or 0))
+    end
+
+    return table.concat(parts, ":")
+end
+
+function addon:IsAtlasLootBossTable(dataId)
+    local upperDataId
+    local markerIndex
+
+    if not dataId or dataId == "" then
+        return false
+    end
+
+    upperDataId = string.upper(tostring(dataId))
+
+    if string.match(upperDataId, "SET$") or string.find(upperDataId, "SETMENU", 1, true) then
+        return false
+    end
+
+    for markerIndex = 1, table.getn(ATLASLOOT_NON_BOSS_TABLE_MARKERS) do
+        if string.find(upperDataId, ATLASLOOT_NON_BOSS_TABLE_MARKERS[markerIndex], 1, true) then
+            return false
+        end
+    end
+
+    return true
+end
+
+function addon:CollectAtlasLootBossTableIds()
+    local dataIds = {}
+    local seen = {}
+    local function collect(buttonTables)
+        local zoneData
+        local dataId
+
+        if type(buttonTables) ~= "table" then
+            return
+        end
+
+        for _, zoneData in pairs(buttonTables) do
+            if type(zoneData) == "table" then
+                for _, dataId in pairs(zoneData) do
+                    if type(dataId) == "string" and dataId ~= "" and not seen[dataId] then
+                        seen[dataId] = true
+                        table.insert(dataIds, dataId)
+                    end
+                end
+            end
+        end
+    end
+
+    collect(_G.AtlasLootBossButtons)
+    collect(_G.AtlasLootNewBossButtons)
+    collect(_G.AtlasLootWBBossButtons)
+
+    return dataIds
+end
+
+function addon:IndexAtlasLootBossTable(index, dataId, bossName)
+    local lootTable
+    local row
+    local itemId
+    local record
+
+    if not bossName or bossName == "" or type(_G.AtlasLoot_Data) ~= "table" then
+        return
+    end
+
+    lootTable = _G.AtlasLoot_Data[dataId]
+
+    if type(lootTable) ~= "table" then
+        return
+    end
+
+    for _, row in pairs(lootTable) do
+        if type(row) == "table" then
+            itemId = getAtlasLootItemId(row[2])
+
+            if itemId then
+                record = index[itemId]
+
+                if not record then
+                    record = {
+                        bossNames = {},
+                        count = 0,
+                        firstBossName = nil,
+                    }
+                    index[itemId] = record
+                end
+
+                if not record.bossNames[bossName] then
+                    record.bossNames[bossName] = true
+                    record.count = safenum(record.count, 0) + 1
+
+                    if not record.firstBossName then
+                        record.firstBossName = bossName
+                    end
+                end
+            end
+        end
+    end
+end
+
+function addon:EnsureAtlasLootBossIndex()
+    local signature
+    local dataIds
+    local index = {}
+    local dataId
+    local tableInfo
+    local bossName
+
+    if not self:CanUseAtlasLootBossData() then
+        return nil
+    end
+
+    signature = self:GetAtlasLootBossIndexSignature()
+
+    if self.atlasLootBossIndex and self.atlasLootBossIndexSignature == signature then
+        return self.atlasLootBossIndex
+    end
+
+    if type(_G.AtlasLoot_LoadAllModules) == "function" then
+        pcall(_G.AtlasLoot_LoadAllModules)
+    end
+
+    dataIds = self:CollectAtlasLootBossTableIds()
+
+    for _, dataId in ipairs(dataIds) do
+        tableInfo = _G.AtlasLoot_TableNames and _G.AtlasLoot_TableNames[dataId] or nil
+        bossName = tableInfo and tostring(tableInfo[1] or "") or ""
+
+        if self:IsAtlasLootBossTable(dataId)
+            and bossName ~= ""
+            and type(_G.AtlasLoot_Data) == "table"
+            and type(_G.AtlasLoot_Data[dataId]) == "table" then
+            self:IndexAtlasLootBossTable(index, dataId, bossName)
+        end
+    end
+
+    self.atlasLootBossIndex = index
+    self.atlasLootBossIndexSignature = self:GetAtlasLootBossIndexSignature()
+    return self.atlasLootBossIndex
+end
+
+function addon:GetAtlasLootBossNameForItem(itemLink)
+    local itemId = getItemIdFromLink(itemLink)
+    local index = self:EnsureAtlasLootBossIndex()
+    local record
+    local lastBossName
+
+    if not itemId or not index then
+        return nil
+    end
+
+    record = index[itemId]
+
+    if not record then
+        return nil
+    end
+
+    lastBossName = self.lastLootContext and tostring(self.lastLootContext.name or "") or ""
+
+    if lastBossName ~= "" and record.bossNames[lastBossName] then
+        return lastBossName
+    end
+
+    if safenum(record.count, 0) == 1 then
+        return record.firstBossName
+    end
+
+    return nil
+end
+
+function addon:ResolveBossNameForLoot(itemLink, sourceGuid)
+    local bossName = self:GetBossNameForLootSource(sourceGuid)
+
+    if bossName and bossName ~= "" and bossName ~= "Прочее" then
+        return bossName
+    end
+
+    return self:GetAtlasLootBossNameForItem(itemLink) or "Прочее"
 end
 
 function addon:RememberLootSource(sourceGuid, sourceName)
@@ -459,8 +904,13 @@ function addon:GetLootSourceGuidForSlot(slotIndex)
     return nil
 end
 
-function addon:RegisterLootEntry(itemLink, bossName, sourceGuid)
+function addon:RegisterLootEntry(itemLink, bossName, sourceGuid, quality)
     self:EnsureLootDB()
+
+    if not itemLink or itemLink == "" or not self:ShouldTrackLootItem(itemLink, quality) then
+        return nil
+    end
+
     local entry = self:NormalizeLootEntry({
         id = self:CreateLootEntryId(),
         itemLink = itemLink,
@@ -472,7 +922,7 @@ function addon:RegisterLootEntry(itemLink, bossName, sourceGuid)
         warned20 = false,
     })
 
-    if not entry or not itemLink or itemLink == "" then
+    if not entry then
         return nil
     end
 
@@ -546,8 +996,10 @@ function addon:CaptureLootWindowEntries()
     local slotCount
     local slotIndex
     local itemLink
+    local slotQuality
     local sourceGuid
     local bossName
+    local entry
     local capturedCount = 0
 
     if not GetNumLootItems then
@@ -561,11 +1013,15 @@ function addon:CaptureLootWindowEntries()
             itemLink = GetLootSlotLink and GetLootSlotLink(slotIndex) or nil
 
             if itemLink and itemLink ~= "" then
+                slotQuality = select(4, GetLootSlotInfo(slotIndex))
                 sourceGuid = self:GetLootSourceGuidForSlot(slotIndex)
-                bossName = self:GetBossNameForLootSource(sourceGuid)
-                self:RegisterLootEntry(itemLink, bossName, sourceGuid)
-                self:TrackRecentLootWindowEntry(itemLink, bossName)
-                capturedCount = capturedCount + 1
+                bossName = self:ResolveBossNameForLoot(itemLink, sourceGuid)
+                entry = self:RegisterLootEntry(itemLink, bossName, sourceGuid, slotQuality)
+
+                if entry then
+                    self:TrackRecentLootWindowEntry(itemLink, bossName)
+                    capturedCount = capturedCount + 1
+                end
             end
         end
     end
@@ -653,7 +1109,7 @@ function addon:HandleLootChatMessage(message)
         return
     end
 
-    bossName = self:GetBossNameForLootSource(nil)
+    bossName = self:ResolveBossNameForLoot(itemLink, nil)
 
     if self:ConsumeRecentLootWindowEntry(itemLink, bossName) then
         return
@@ -1572,15 +2028,17 @@ function addon:EnsureSplitEntry(name)
     if not entry then
         entry = {
             role = isLeader and "рл" or "дд",
-            percent = isLeader and 0 or 100,
+            percent = self:GetDefaultPercentForRole(name, isLeader and "рл" or "дд"),
             penaltyNote = "",
             bonusNote = "",
             penaltyAdjust = 0,
             bonusAdjust = 0,
             debt = 0,
             spec = "",
+            classToken = "",
             roleManual = false,
             sentAmount = nil,
+            sentPayoutKey = nil,
         }
         entries[name] = entry
     end
@@ -1591,6 +2049,15 @@ function addon:EnsureSplitEntry(name)
 
     if entry.percent == nil then
         entry.percent = self:GetDefaultPercentForRole(name, entry.role)
+    end
+
+    if isLeader and GoldBidDB.split.fixedSharesMigrated then
+        if safenum(entry.percent, 0) == 0 then
+            entry.percent = self:GetDefaultPercentForRole(name, "рл")
+            self:ResetSplitAdjustments(entry)
+        end
+
+        GoldBidDB.split.fixedSharesMigrated = nil
     end
 
     if entry.penaltyNote == nil then
@@ -1623,12 +2090,20 @@ function addon:EnsureSplitEntry(name)
         entry.spec = ""
     end
 
+    if entry.classToken == nil then
+        entry.classToken = ""
+    end
+
     if entry.roleManual == nil then
         entry.roleManual = false
     end
 
     if entry.sentAmount ~= nil then
         entry.sentAmount = floorGold(entry.sentAmount)
+    end
+
+    if entry.sentPayoutKey == "" then
+        entry.sentPayoutKey = nil
     end
 
     if adjustmentsMissing then
@@ -1725,19 +2200,46 @@ function addon:EnsureSplitDB()
     end
 
     GoldBidDB.split = GoldBidDB.split or {}
-    GoldBidDB.split.entries = GoldBidDB.split.entries or {}
-
-    GoldBidDB.split.leaderSharePercent = 0
-
-    if GoldBidDB.split.substitutePercent == nil then
-        GoldBidDB.split.substitutePercent = 100
-    end
+    ensureSplitSettingsDefaults(GoldBidDB.split)
 end
 
 function addon:RefreshSplitRoster()
     self:EnsureSplitDB()
-    local roster = self:GetGroupRosterNames()
+    local currentRoster = self:GetGroupRosterNames()
+    local roster = {}
+    local rosterSnapshot = GoldBidDB.split.rosterSnapshot or {}
+    local seen = {}
     local index
+    local name
+
+    local function addName(value, remember)
+        value = normalizeName(value)
+
+        if not value then
+            return
+        end
+
+        if remember then
+            rosterSnapshot[value] = true
+        end
+
+        if not seen[value] then
+            seen[value] = true
+            table.insert(roster, value)
+        end
+    end
+
+    for index = 1, table.getn(currentRoster) do
+        addName(currentRoster[index], true)
+    end
+
+    addName(self:GetLeaderName() or self:GetPlayerName(), true)
+
+    for name in pairs(rosterSnapshot) do
+        addName(name, false)
+    end
+
+    GoldBidDB.split.rosterSnapshot = rosterSnapshot
 
     for index = 1, table.getn(roster) do
         self:EnsureSplitEntry(roster[index])
@@ -1748,7 +2250,25 @@ end
 
 function addon:SetLeaderSharePercent(value)
     self:EnsureSplitDB()
-    GoldBidDB.split.leaderSharePercent = 0
+    local leaderName
+    local leaderEntry
+
+    GoldBidDB.split.leaderSharePercent = clampPercent(
+        value,
+        GoldBidDB.split.leaderSharePercent or DEFAULT_LEADER_SHARE_PERCENT,
+        100
+    )
+
+    leaderName = self:GetLeaderName() or self:GetPlayerName()
+
+    if leaderName and leaderName ~= "" then
+        leaderEntry = self:EnsureSplitEntry(leaderName)
+
+        if leaderEntry then
+            leaderEntry.percent = GoldBidDB.split.leaderSharePercent
+            self:ResetSplitAdjustments(leaderEntry)
+        end
+    end
 
     if self.RefreshMainWindow then
         self:RefreshMainWindow()
@@ -1765,6 +2285,78 @@ function addon:NormalizeSpecName(specName, classToken)
     end
 
     return specName
+end
+
+function addon:NormalizeSplitRoleValue(value)
+    value = tostring(value or "")
+
+    if value == "" then
+        return ""
+    end
+
+    if value == "МТ" or value == "мт" or value == "MT" or value == "mt" then
+        return "мт"
+    end
+
+    if value == "ОТ" or value == "от" or value == "OT" or value == "ot" then
+        return "от"
+    end
+
+    if value == "ДД" or value == "дд" or value == "DD" or value == "dd" then
+        return "дд"
+    end
+
+    if value == "РЛ" or value == "рл" then
+        return "рл"
+    end
+
+    if value == "Зам" or value == "зам" or value == "замена" then
+        return "замена"
+    end
+
+    if value == "Танк" or value == "танк" then
+        return "танк"
+    end
+
+    if value == "Хил" or value == "хил" then
+        return "хил"
+    end
+
+    return value
+end
+
+function addon:GetSplitRoleDisplayName(role, isLeader, isSubstitute)
+    role = self:NormalizeSplitRoleValue(role)
+
+    if isLeader or role == "рл" then
+        return "РЛ"
+    end
+
+    if isSubstitute or role == "замена" then
+        return "Зам"
+    end
+
+    if role == "мт" then
+        return "МТ"
+    end
+
+    if role == "от" then
+        return "ОТ"
+    end
+
+    if role == "танк" then
+        return "Танк"
+    end
+
+    if role == "хил" then
+        return "Хил"
+    end
+
+    if role == "дд" then
+        return "ДД"
+    end
+
+    return role ~= "" and role or "-"
 end
 
 function addon:GetRoleForSpec(specName, classToken)
@@ -1837,6 +2429,41 @@ function addon:GetRoleForSpec(specName, classToken)
     return nil
 end
 
+function addon:GetSplitAutoRole(name, specName)
+    local unit
+    local classToken
+
+    if normalizeName(name) == normalizeName(self:GetLeaderName() or self:GetPlayerName()) then
+        return "рл"
+    end
+
+    unit = self:GetUnitIdForName(name)
+    classToken = unit and select(2, UnitClass(unit)) or nil
+
+    return self:GetRoleForSpec(specName, classToken) or "дд"
+end
+
+function addon:GetSplitClassToken(name)
+    local unit
+    local entry
+    local classToken
+
+    if not name or name == "" then
+        return ""
+    end
+
+    unit = self:GetUnitIdForName(name)
+    classToken = unit and select(2, UnitClass(unit)) or nil
+    entry = self:EnsureSplitEntry(name)
+
+    if classToken and classToken ~= "" then
+        entry.classToken = tostring(classToken)
+        return tostring(classToken)
+    end
+
+    return tostring(entry.classToken or "")
+end
+
 function addon:GetTalentSpecName(isInspect, classToken)
     local bestName = ""
     local bestPoints = -1
@@ -1864,7 +2491,7 @@ function addon:GetTalentSpecName(isInspect, classToken)
     return self:NormalizeSpecName(bestName, classToken)
 end
 
-function addon:SetSplitEntrySpec(name, specName)
+function addon:SetSplitEntrySpec(name, specName, classTokenHint)
     self:EnsureSplitDB()
     local entry
     local unit
@@ -1884,7 +2511,16 @@ function addon:SetSplitEntrySpec(name, specName)
     entry.spec = tostring(specName or "")
 
     unit = self:GetUnitIdForName(name)
-    classToken = unit and select(2, UnitClass(unit)) or nil
+    classToken = classTokenHint
+
+    if classToken == nil or classToken == "" then
+        classToken = unit and select(2, UnitClass(unit)) or nil
+    end
+
+    if classToken and classToken ~= "" then
+        entry.classToken = tostring(classToken)
+    end
+
     roleBySpec = self:GetRoleForSpec(entry.spec, classToken)
     previousDefaultPercent = self:GetDefaultPercentForRole(name, previousRole)
 
@@ -2036,18 +2672,36 @@ function addon:UpdatePlayerSpecialization()
     self:SetSplitEntrySpec(self:GetPlayerName(), specName)
 end
 
+function addon:IsBlizzardInspectWindowOpen()
+    return (InspectFrame and InspectFrame:IsShown())
+        or (InspectPaperDollFrame and InspectPaperDollFrame:IsShown())
+        or (InspectTalentFrame and InspectTalentFrame:IsShown())
+end
+
+function addon:ResetInspectRequest(clearInspectPlayer)
+    self.inspectPendingName = nil
+    self.inspectPendingUnit = nil
+    self.inspectPendingClassToken = nil
+    self.inspectPendingAt = nil
+
+    if clearInspectPlayer and ClearInspectPlayer then
+        ClearInspectPlayer()
+    end
+end
+
 function addon:ProcessInspectQueue()
     local nextRequest
 
+    if self:IsBlizzardInspectWindowOpen() then
+        if self.inspectPendingName then
+            self:ResetInspectRequest(false)
+        end
+        return
+    end
+
     if self.inspectPendingName then
         if self.inspectPendingAt and (time() - self.inspectPendingAt) > 4 then
-            self.inspectPendingName = nil
-            self.inspectPendingUnit = nil
-            self.inspectPendingClassToken = nil
-            self.inspectPendingAt = nil
-            if ClearInspectPlayer then
-                ClearInspectPlayer()
-            end
+            self:ResetInspectRequest(true)
         end
         return
     end
@@ -2085,6 +2739,17 @@ function addon:ProcessInspectQueue()
 end
 
 function addon:HandleInspectTalentReady(unit)
+    if self:IsBlizzardInspectWindowOpen() then
+        if self.inspectPendingName then
+            self:ResetInspectRequest(false)
+        end
+        return
+    end
+
+    if not self.inspectPendingName then
+        return
+    end
+
     local inspectUnit = unit or self.inspectPendingUnit
     local inspectName = self.inspectPendingName
     local classToken = self.inspectPendingClassToken
@@ -2097,22 +2762,15 @@ function addon:HandleInspectTalentReady(unit)
 
     if inspectName then
         specName = self:GetTalentSpecName(true, classToken)
-        self:SetSplitEntrySpec(inspectName, specName)
+        self:SetSplitEntrySpec(inspectName, specName, classToken)
     end
 
-    self.inspectPendingName = nil
-    self.inspectPendingUnit = nil
-    self.inspectPendingClassToken = nil
-    self.inspectPendingAt = nil
-
-    if ClearInspectPlayer then
-        ClearInspectPlayer()
-    end
+    self:ResetInspectRequest(true)
 end
 
 function addon:GetDefaultPercentForRole(name, role)
     if normalizeName(name) == normalizeName(self:GetLeaderName() or self:GetPlayerName()) then
-        return 0
+        return clampPercent(GoldBidDB.split and GoldBidDB.split.leaderSharePercent, DEFAULT_LEADER_SHARE_PERCENT, 100)
     end
 
     if role == "замена" then
@@ -2127,29 +2785,37 @@ function addon:GetDefaultPercentForRole(name, role)
 end
 
 function addon:GetSplitRoleSortRank(role, isLeader, isSubstitute)
-    role = tostring(role or "")
+    role = self:NormalizeSplitRoleValue(role)
 
     if isLeader then
         return 0
     end
 
-    if role == "танк" then
+    if role == "мт" then
         return isSubstitute and 11 or 1
     end
 
-    if role == "хил" then
+    if role == "от" then
         return isSubstitute and 12 or 2
     end
 
-    if role == "дд" then
+    if role == "танк" then
         return isSubstitute and 13 or 3
     end
 
-    if role == "замена" or isSubstitute then
-        return 14
+    if role == "хил" then
+        return isSubstitute and 14 or 4
     end
 
-    return 4
+    if role == "дд" then
+        return isSubstitute and 15 or 5
+    end
+
+    if role == "замена" or isSubstitute then
+        return 16
+    end
+
+    return 6
 end
 
 function addon:ResetSplitAdjustments(entry)
@@ -2207,14 +2873,11 @@ function addon:UpdateSplitEntryField(name, field, value, skipRefresh)
     elseif field == "debt" then
         entry.debt = safenum(value, entry.debt or 0)
     elseif field == "role" then
-        entry.role = tostring(value or "")
+        entry.role = self:NormalizeSplitRoleValue(value)
         entry.roleManual = entry.role ~= ""
 
         if not entry.roleManual then
-            local unit = self:GetUnitIdForName(name)
-            local classToken = unit and select(2, UnitClass(unit)) or nil
-
-            entry.role = self:GetRoleForSpec(entry.spec, classToken) or entry.role
+            entry.role = self:GetSplitAutoRole(name, entry.spec) or entry.role
         end
 
         if previousPercent == previousDefaultPercent then
@@ -2258,14 +2921,11 @@ function addon:ApplySplitPreset(name, preset)
     elseif preset == "main" then
         if normalizeName(name) == normalizeName(self:GetLeaderName() or self:GetPlayerName()) then
             entry.role = "рл"
-            entry.percent = 0
+            entry.percent = self:GetDefaultPercentForRole(name, "рл")
             entry.roleManual = true
             self:ResetSplitAdjustments(entry)
         else
-            local unit = self:GetUnitIdForName(name)
-            local classToken = unit and select(2, UnitClass(unit)) or nil
-
-            entry.role = self:GetRoleForSpec(entry.spec, classToken) or "дд"
+            entry.role = self:GetSplitAutoRole(name, entry.spec)
             entry.percent = self:GetDefaultPercentForRole(name, entry.role)
             entry.roleManual = false
             self:ResetSplitAdjustments(entry)
@@ -2296,10 +2956,14 @@ end
 function addon:ComputeDetailedSplit()
     self:EnsureSplitDB()
     local roster = self:RefreshSplitRoster()
-    local leaderPercent = 0
-    local totalPot = safenum(GoldBidDB.ledger.pot, 0)
-    local leaderShareAmount = 0
-    local distributablePot = floorGold(totalPot)
+    local leaderName = normalizeName(self:GetLeaderName() or self:GetPlayerName())
+    local leaderEntry = leaderName and self:EnsureSplitEntry(leaderName) or nil
+    local requestedLeaderPercent = leaderEntry and safenum(leaderEntry.percent, GoldBidDB.split.leaderSharePercent) or GoldBidDB.split.leaderSharePercent
+    local totalPot = floorGold(safenum(GoldBidDB.ledger.pot, 0))
+    local guildPercent, leaderPercent, playerSharePercent = getEffectiveFixedSharePercents(GoldBidDB.split, requestedLeaderPercent)
+    local guildShareAmount = floorGold(totalPot * (guildPercent / 100))
+    local leaderShareAmount = floorGold(totalPot * (leaderPercent / 100))
+    local distributablePot = math.max(0, totalPot - guildShareAmount - leaderShareAmount)
     local results = {}
     local totalWeight = 0
     local totalDebt = 0
@@ -2308,26 +2972,38 @@ function addon:ComputeDetailedSplit()
     local substituteCount = 0
     local eligibleCount = 0
     local baseShare
+    local payoutKey
     local index
 
     for index = 1, table.getn(roster) do
         local name = roster[index]
         local entry = self:EnsureSplitEntry(name)
+        local isLeader = normalizeName(name) == leaderName
         local percent = math.max(0, safenum(entry.percent, 0))
         local debt = safenum(entry.debt, 0)
-        local weight = percent / 100
+        local weight
 
-        totalWeight = totalWeight + weight
-        totalDebt = totalDebt + debt
-        if percent > 0 then
-            eligibleCount = eligibleCount + 1
+        if isLeader then
+            percent = leaderPercent
+            weight = 0
+        else
+            weight = percent / 100
+            totalWeight = totalWeight + weight
+
+            if percent > 0 then
+                eligibleCount = eligibleCount + 1
+            end
         end
+
+        totalDebt = totalDebt + debt
 
         table.insert(results, {
             index = index,
             name = name,
             spec = tostring(entry.spec or ""),
+            classToken = self:GetSplitClassToken(name),
             role = tostring(entry.role or ""),
+            roleManual = entry.roleManual and true or false,
             percent = percent,
             penaltyNote = tostring(entry.penaltyNote or ""),
             bonusNote = tostring(entry.bonusNote or ""),
@@ -2337,7 +3013,8 @@ function addon:ComputeDetailedSplit()
             debt = debt,
             weight = weight,
             sentAmount = entry.sentAmount,
-            isLeader = normalizeName(name) == normalizeName(self:GetLeaderName() or self:GetPlayerName()),
+            sentPayoutKey = entry.sentPayoutKey,
+            isLeader = isLeader,
             isSubstitute = tostring(entry.role or "") == "замена",
         })
     end
@@ -2353,14 +3030,18 @@ function addon:ComputeDetailedSplit()
         return tostring(left.name or "") < tostring(right.name or "")
     end)
 
-    baseShare = eligibleCount > 0 and floorGold(distributablePot / eligibleCount) or 0
+    baseShare = totalWeight > 0 and floorGold(distributablePot / totalWeight) or 0
 
     for index = 1, table.getn(results) do
         local row = results[index]
 
-        row.gross = floorGold(baseShare * row.weight)
+        if row.isLeader then
+            row.gross = leaderShareAmount
+        else
+            row.gross = floorGold(baseShare * row.weight)
+        end
+
         row.net = floorGold(row.gross - row.debt)
-        row.sent = row.net > 0 and row.sentAmount ~= nil and floorGold(row.sentAmount) == floorGold(row.net)
         totalNet = totalNet + row.net
 
         if row.isSubstitute then
@@ -2370,10 +3051,24 @@ function addon:ComputeDetailedSplit()
         end
     end
 
+    payoutKey = buildSplitPayoutKey(totalPot, guildPercent, leaderPercent, distributablePot, baseShare, results)
+
+    for index = 1, table.getn(results) do
+        local row = results[index]
+
+        row.sent = row.net > 0
+            and row.sentAmount ~= nil
+            and floorGold(row.sentAmount) == floorGold(row.net)
+            and tostring(row.sentPayoutKey or "") == payoutKey
+    end
+
     GoldBidDB.split.lastComputed = {
         totalPot = totalPot,
+        guildSharePercent = guildPercent,
+        guildShareAmount = floorGold(guildShareAmount),
         leaderSharePercent = leaderPercent,
         leaderShareAmount = floorGold(leaderShareAmount),
+        playerSharePercent = playerSharePercent,
         distributablePot = distributablePot,
         baseShare = baseShare,
         eligibleCount = eligibleCount,
@@ -2382,6 +3077,7 @@ function addon:ComputeDetailedSplit()
         totalNet = floorGold(totalNet),
         mainCount = mainCount,
         substituteCount = substituteCount,
+        payoutKey = payoutKey,
         rows = results,
     }
 
@@ -2459,6 +3155,7 @@ function addon:BuildMailPayoutQueue()
                 bonusNote = tostring((row and row.bonusNote) or ""),
                 penaltyAdjust = math.max(0, safenum((row and row.penaltyAdjust) or 0, 0)),
                 bonusAdjust = math.max(0, safenum((row and row.bonusAdjust) or 0, 0)),
+                payoutKey = tostring(split and split.payoutKey or ""),
             })
         end
     end
@@ -2764,6 +3461,7 @@ function addon:HandleMailSendSuccess()
 
         if splitEntry then
             splitEntry.sentAmount = floorGold(entry.amount or 0)
+            splitEntry.sentPayoutKey = tostring(entry.payoutKey or "")
         end
     end
 
@@ -2879,8 +3577,10 @@ function addon:ResetAllData(skipBroadcast)
     }
 
     GoldBidDB.split = {
-        leaderSharePercent = 0,
+        guildSharePercent = splitSettings.guildSharePercent or DEFAULT_GUILD_SHARE_PERCENT,
+        leaderSharePercent = splitSettings.leaderSharePercent or DEFAULT_LEADER_SHARE_PERCENT,
         substitutePercent = splitSettings.substitutePercent or 100,
+        rosterSnapshot = {},
         entries = {},
         lastComputed = nil,
     }
@@ -3442,16 +4142,33 @@ function addon:BroadcastState(target, forceSend)
 end
 
 function addon:SendPayoutState(target)
-    local payout = GoldBidDB.ledger.payout
+    local split = self:ComputeDetailedSplit()
+    local payout = {
+        totalPot = split.totalPot,
+        eligibleCount = split.eligibleCount,
+        perPlayer = split.baseShare,
+        guildSharePercent = split.guildSharePercent,
+        guildShareAmount = split.guildShareAmount,
+        leaderSharePercent = split.leaderSharePercent,
+        leaderShareAmount = split.leaderShareAmount,
+        playerSharePercent = split.playerSharePercent,
+        distributablePot = split.distributablePot,
+        totalDebt = split.totalDebt,
+        totalNet = split.totalNet,
+    }
 
-    if not payout then
-        return
-    end
+    GoldBidDB.ledger.payout = payout
 
     self:SendCommand("PAYOUT", {
         payout.totalPot or 0,
         payout.eligibleCount or 0,
         payout.perPlayer or 0,
+        payout.guildShareAmount or 0,
+        payout.leaderShareAmount or 0,
+        payout.distributablePot or 0,
+        payout.guildSharePercent or 0,
+        payout.leaderSharePercent or 0,
+        payout.playerSharePercent or 0,
     }, target and "WHISPER" or self:GetDistributionChannel(), target)
 end
 
@@ -3521,9 +4238,13 @@ function addon:ComputePayout()
 
     GoldBidDB.ledger.payout = {
         totalPot = split.totalPot,
-        eligibleCount = table.getn(split.rows),
+        eligibleCount = split.eligibleCount,
         perPlayer = split.baseShare,
+        guildSharePercent = split.guildSharePercent,
+        guildShareAmount = split.guildShareAmount,
+        leaderSharePercent = split.leaderSharePercent,
         leaderShareAmount = split.leaderShareAmount,
+        playerSharePercent = split.playerSharePercent,
         distributablePot = split.distributablePot,
         totalDebt = split.totalDebt,
         totalNet = split.totalNet,
@@ -3693,7 +4414,19 @@ function addon:BuildExportText()
     }
     local sales = GoldBidDB.ledger.sales
     local split = self:ComputeDetailedSplit()
-    local payout = GoldBidDB.ledger.payout
+    local payout = {
+        totalPot = split.totalPot,
+        eligibleCount = split.eligibleCount,
+        perPlayer = split.baseShare,
+        guildSharePercent = split.guildSharePercent,
+        guildShareAmount = split.guildShareAmount,
+        leaderSharePercent = split.leaderSharePercent,
+        leaderShareAmount = split.leaderShareAmount,
+        playerSharePercent = split.playerSharePercent,
+        distributablePot = split.distributablePot,
+        totalDebt = split.totalDebt,
+        totalNet = split.totalNet,
+    }
     local index
 
     if table.getn(sales) == 0 then
@@ -3718,9 +4451,10 @@ function addon:BuildExportText()
         table.insert(lines, "")
         table.insert(lines, "Итоги делёжки")
         table.insert(lines, string.format("Участников: %d", payout.eligibleCount or 0))
+        table.insert(lines, string.format("Гильдия %d%%: %dg", floorGold(payout.guildSharePercent or 0), floorGold(payout.guildShareAmount or 0)))
+        table.insert(lines, string.format("РЛ %d%%: %dg", floorGold(payout.leaderSharePercent or 0), floorGold(payout.leaderShareAmount or 0)))
+        table.insert(lines, string.format("Игрокам %d%%: %dg", floorGold(payout.playerSharePercent or 0), floorGold(payout.distributablePot or 0)))
         table.insert(lines, string.format("База 100%%: %dg", floorGold(payout.perPlayer or 0)))
-        table.insert(lines, string.format("Доля РЛ: %dg", floorGold(payout.leaderShareAmount or 0)))
-        table.insert(lines, string.format("К распределению: %dg", floorGold(payout.distributablePot or 0)))
         table.insert(lines, string.format("Долги всего: %dg", floorGold(payout.totalDebt or 0)))
         table.insert(lines, string.format("Итого к выплате: %dg", floorGold(payout.totalNet or 0)))
     end
@@ -3878,7 +4612,7 @@ function addon:HandleAddonMessage(prefix, message, channel, sender)
 
     if command == "SPEC" then
         if self:IsPlayerController() then
-            self:SetSplitEntrySpec(normalizeName(fields[2]) or sender, fields[3] or "")
+            self:SetSplitEntrySpec(normalizeName(fields[2]) or sender, fields[3] or "", fields[4] or "")
         end
         return
     end
@@ -3903,6 +4637,12 @@ function addon:HandleAddonMessage(prefix, message, channel, sender)
                 totalPot = safenum(fields[2], 0),
                 eligibleCount = safenum(fields[3], 0),
                 perPlayer = safenum(fields[4], 0),
+                guildShareAmount = safenum(fields[5], 0),
+                leaderShareAmount = safenum(fields[6], 0),
+                distributablePot = safenum(fields[7], 0),
+                guildSharePercent = safenum(fields[8], DEFAULT_GUILD_SHARE_PERCENT),
+                leaderSharePercent = safenum(fields[9], DEFAULT_LEADER_SHARE_PERCENT),
+                playerSharePercent = safenum(fields[10], math.max(0, 100 - DEFAULT_GUILD_SHARE_PERCENT - DEFAULT_LEADER_SHARE_PERCENT)),
             }
 
             if self.RefreshMainWindow then

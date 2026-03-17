@@ -118,6 +118,73 @@ local function setupMiniActionButton(button, width, height, text)
     end)
 end
 
+local function setupSplitRoleSelector(button, width)
+    createBackdrop(button, { 0.07, 0.07, 0.09, 0.96 }, { 0.45, 0.1, 0.1, 0.9 })
+    button:SetSize(width, 18)
+    button:EnableMouse(true)
+    button.label = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    button.label:SetPoint("LEFT", 5, 0)
+    button.label:SetPoint("RIGHT", -13, 0)
+    button.label:SetJustifyH("CENTER")
+    button.arrow = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    button.arrow:SetPoint("RIGHT", -5, -1)
+    button.arrow:SetText("v")
+    if button.SetHitRectInsets then
+        button:SetHitRectInsets(0, 0, 0, 0)
+    end
+    button:SetScript("OnEnter", function(selfButton)
+        if not selfButton.isMenuEnabled then
+            return
+        end
+
+        selfButton:SetBackdropColor(0.12, 0.08, 0.1, 0.98)
+    end)
+    button:SetScript("OnLeave", function(selfButton)
+        if selfButton.isMenuEnabled then
+            selfButton:SetBackdropColor(0.07, 0.07, 0.09, 0.96)
+        else
+            selfButton:SetBackdropColor(0.05, 0.05, 0.07, 0.88)
+        end
+    end)
+end
+
+local function setSplitRoleSelectorState(button, text, canOpenMenu)
+    if not button then
+        return
+    end
+
+    button.isMenuEnabled = canOpenMenu and true or false
+    button:EnableMouse(button.isMenuEnabled)
+
+    if button.label then
+        button.label:SetText(text or "-")
+    end
+
+    if button.arrow then
+        button.arrow:SetShown(button.isMenuEnabled)
+    end
+
+    if button.isMenuEnabled then
+        button:SetBackdropColor(0.07, 0.07, 0.09, 0.96)
+        button:SetBackdropBorderColor(0.45, 0.1, 0.1, 0.9)
+        if button.label and button.label.SetTextColor then
+            button.label:SetTextColor(1, 0.95, 0.8)
+        end
+        if button.arrow and button.arrow.SetTextColor then
+            button.arrow:SetTextColor(1, 0.82, 0)
+        end
+    else
+        button:SetBackdropColor(0.05, 0.05, 0.07, 0.88)
+        button:SetBackdropBorderColor(0.3, 0.09, 0.09, 0.75)
+        if button.label and button.label.SetTextColor then
+            button.label:SetTextColor(0.9, 0.84, 0.72)
+        end
+        if button.arrow and button.arrow.SetTextColor then
+            button.arrow:SetTextColor(0.6, 0.56, 0.45)
+        end
+    end
+end
+
 local function formatGold(value)
     local number = math.floor(tonumber(value) or 0)
     local negative = false
@@ -825,32 +892,30 @@ end
 
 function addon:GetSuggestedBidBase()
     local auction = self.currentAuction or {}
-    local playerName = self:GetPlayerName()
-    local highestOtherBid = nil
-    local ownBid = auction.bids and auction.bids[playerName] or nil
-    local name, amount
+    local _, topAmount = self:GetHighestBid()
+    local suggestedBid = math.max(0, tonumber(auction.minBid) or 0)
 
-    if not self:IsAuctionActive() then
+    if not self:IsAuctionActive() or self:IsRollAuction() then
         return 0
     end
 
-    for name, amount in pairs(auction.bids or {}) do
-        if name ~= playerName and amount and amount > 0 then
-            if not highestOtherBid or amount > highestOtherBid then
-                highestOtherBid = amount
-            end
-        end
+    if topAmount and topAmount > 0 then
+        suggestedBid = topAmount + self:GetEffectiveRaiseStep()
     end
 
-    if highestOtherBid then
-        return highestOtherBid
+    return suggestedBid
+end
+
+function addon:GetBidButtonAmount()
+    local frame = self.frame or self:CreateMainWindow()
+    local typedBid = parseNumberText(frame.bidBox and frame.bidBox:GetText() or "") or 0
+    local suggestedBid = self:GetSuggestedBidBase()
+
+    if self:IsRollAuction() then
+        return typedBid
     end
 
-    if ownBid and ownBid > 0 then
-        return ownBid
-    end
-
-    return auction.minBid or 0
+    return math.max(typedBid, suggestedBid)
 end
 
 function addon:IncrementBidAmount()
@@ -938,6 +1003,21 @@ function addon:UpdateMainWindowLayout()
     frame.modeDropDown:SetShown(hasFullAccess)
 
     if hasFullAccess then
+        local controlsWidth = math.max(736, math.floor((frame:GetWidth() or 760) - 24))
+        local fieldBaseLeft = 236
+        local fieldGap = 18
+        local buttonWidth = 96
+        local buttonGap = 10
+        local buttonBlockWidth = (buttonWidth * 2) + buttonGap
+        local addStepWidth = (frame.addStepButton and frame.addStepButton:GetWidth()) or 26
+        local buttonColumnLeft = math.max(522, controlsWidth - buttonBlockWidth - 12)
+        local availableFieldSpace = buttonColumnLeft - fieldBaseLeft - 24
+        local fieldWidth = math.max(90, math.min(120,
+            math.floor((availableFieldSpace - fieldGap - addStepWidth - 6) / 2)))
+        local usedFieldSpace = (fieldWidth * 2) + fieldGap + addStepWidth + 6
+        local fieldStartLeft = fieldBaseLeft + math.max(0, math.floor((availableFieldSpace - usedFieldSpace) / 2))
+        local secondFieldLeft = fieldStartLeft + fieldWidth + fieldGap
+
         frame:SetBackdropColor(0.02, 0.02, 0.04, 0.98)
         frame:SetBackdropBorderColor(0.7, 0.08, 0.08, 1)
         frame.controlsPanel:SetBackdropColor(0.05, 0.05, 0.08, 0.92)
@@ -989,8 +1069,10 @@ function addon:UpdateMainWindowLayout()
             frame.mailPayoutButton:SetPoint("LEFT", frame.resetButton, "RIGHT", 10, 0)
         end
         frame.itemButton:SetSize(50, 50)
+        frame.itemButton:ClearAllPoints()
         frame.itemButton:SetPoint("TOPLEFT", 54, -44)
         frame.itemText:Show()
+        frame.itemText:ClearAllPoints()
         frame.itemText:SetPoint("TOP", frame.itemButton, "BOTTOM", 0, -8)
         frame.itemText:SetWidth(120)
         frame.itemText:SetJustifyH("CENTER")
@@ -999,37 +1081,51 @@ function addon:UpdateMainWindowLayout()
         frame.modeLabel:ClearAllPoints()
         frame.modeLabel:SetPoint("RIGHT", frame.modeDropDown, "LEFT", 8, 0)
         frame.compactPotText:SetWidth(260)
-        frame.minBidBox:SetWidth(90)
-        frame.incrementBox:SetWidth(90)
-        frame.durationBox:SetWidth(90)
-        frame.bidBox:SetWidth(90)
+        frame.minBidBox:SetWidth(fieldWidth)
+        frame.incrementBox:SetWidth(fieldWidth)
+        frame.durationBox:SetWidth(fieldWidth)
+        frame.bidBox:SetWidth(fieldWidth)
         frame.minBidBox:EnableMouse(not isRollMode)
         frame.incrementBox:EnableMouse(not isRollMode)
         frame.durationBox:EnableMouse(true)
         frame.bidBox:EnableMouse(not isRollMode)
-        frame.bidButton:SetSize(96, 22)
+        frame.startButton:SetSize(buttonWidth, 22)
+        frame.endButton:SetSize(buttonWidth, 22)
+        frame.bidButton:SetSize(buttonWidth, 22)
         frame.passButton:Show()
-        frame.passButton:SetSize(96, 22)
+        frame.passButton:SetSize(buttonWidth, 22)
         frame.passButton:ClearAllPoints()
-        frame.passButton:SetPoint("LEFT", frame.bidButton, "RIGHT", 10, 0)
-        frame.syncButton:SetSize(96, 22)
+        frame.passButton:SetPoint("LEFT", frame.bidButton, "RIGHT", buttonGap, 0)
+        frame.syncButton:SetSize(buttonWidth, 22)
         frame.syncButton:Show()
+        frame.settingsActionButton:SetSize(buttonWidth, 22)
+        frame.settingsActionButton:ClearAllPoints()
+        frame.settingsActionButton:SetPoint("LEFT", frame.syncButton, "RIGHT", buttonGap, 0)
         frame.footerText:Show()
         frame.compactCloseButton:ClearAllPoints()
         frame.compactCloseButton:SetPoint("TOPRIGHT", 2, 2)
         frame.compactSkipButton:ClearAllPoints()
         frame.compactSkipButton:SetPoint("RIGHT", frame.compactCloseButton, "LEFT", -4, 0)
-        frame.minBidLabel:SetWidth(90)
-        frame.incrementLabel:SetWidth(90)
-        frame.durationLabel:SetWidth(90)
-        frame.bidLabel:SetWidth(90)
-        frame.minBidLabel:SetPoint("TOPLEFT", 236, -44)
-        frame.incrementLabel:SetPoint("TOPLEFT", 346, -44)
-        frame.durationLabel:SetPoint("TOPLEFT", 236, -86)
-        frame.bidLabel:SetPoint("TOPLEFT", 346, -86)
-        frame.startButton:SetPoint("TOPLEFT", 522, -48)
-        frame.bidButton:SetPoint("TOPLEFT", 522, -82)
-        frame.syncButton:SetPoint("TOPLEFT", 522, -116)
+        frame.minBidLabel:SetWidth(fieldWidth)
+        frame.incrementLabel:SetWidth(fieldWidth)
+        frame.durationLabel:SetWidth(fieldWidth)
+        frame.bidLabel:SetWidth(fieldWidth)
+        frame.minBidLabel:ClearAllPoints()
+        frame.minBidLabel:SetPoint("TOPLEFT", fieldStartLeft, -44)
+        frame.incrementLabel:ClearAllPoints()
+        frame.incrementLabel:SetPoint("TOPLEFT", secondFieldLeft, -44)
+        frame.durationLabel:ClearAllPoints()
+        frame.durationLabel:SetPoint("TOPLEFT", fieldStartLeft, -86)
+        frame.bidLabel:ClearAllPoints()
+        frame.bidLabel:SetPoint("TOPLEFT", secondFieldLeft, -86)
+        frame.startButton:ClearAllPoints()
+        frame.startButton:SetPoint("TOPLEFT", buttonColumnLeft, -48)
+        frame.endButton:ClearAllPoints()
+        frame.endButton:SetPoint("LEFT", frame.startButton, "RIGHT", buttonGap, 0)
+        frame.bidButton:ClearAllPoints()
+        frame.bidButton:SetPoint("TOPLEFT", buttonColumnLeft, -82)
+        frame.syncButton:ClearAllPoints()
+        frame.syncButton:SetPoint("TOPLEFT", buttonColumnLeft, -116)
     else
         -- Компактный режим клиента: рамка обрезана почти по контенту
         local compactItemLeft = 16
@@ -1284,6 +1380,13 @@ function addon:CreateMainWindow()
     frame:RegisterForDrag("LeftButton")
     frame:SetScript("OnDragStart", frame.StartMoving)
     frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    frame:SetScript("OnSizeChanged", function(selfFrame)
+        if not selfFrame:IsShown() or not addon:HasFullInterfaceAccess() then
+            return
+        end
+
+        addon:RefreshMainWindow()
+    end)
     createBackdrop(frame, { 0.02, 0.02, 0.04, 0.98 }, { 0.7, 0.08, 0.08, 1 })
     frame:Hide()
 
@@ -1684,7 +1787,19 @@ function addon:CreateMainWindow()
     bidButton:SetPoint("TOPLEFT", 522, -82)
     bidButton:SetText("Ставка")
     bidButton:SetScript("OnClick", function()
-        addon:SubmitBid(bidBox:GetText())
+        local amount
+
+        if addon:IsRollAuction() then
+            addon:SubmitBid()
+            return
+        end
+
+        amount = addon:GetBidButtonAmount()
+        frame.bidPreviewBase = addon:GetSuggestedBidBase()
+        frame.bidPreviewValue = amount
+        frame.bidManualOverride = true
+        bidBox:SetText(tostring(amount))
+        addon:SubmitBid(amount)
     end)
 
     passButton = CreateFrame("Button", nil, controlsPanel, "UIPanelButtonTemplate")
@@ -2320,38 +2435,150 @@ function addon:ShowMainWindow(force)
     self:RefreshMainWindow()
 end
 
+local function commitSplitFieldEdit(selfBox, field, resetCursor)
+    local playerName
+
+    if not selfBox then
+        return
+    end
+
+    playerName = tostring(selfBox.playerName or "")
+
+    if playerName ~= "" then
+        addon:UpdateSplitEntryField(playerName, field, selfBox:GetText())
+    end
+
+    if resetCursor and selfBox.SetCursorPosition then
+        selfBox:SetCursorPosition(0)
+    end
+end
+
+local function clearFocusAndCommitSplitField(selfBox, field, resetCursor)
+    if not selfBox then
+        return
+    end
+
+    selfBox.skipNextFocusLostCommit = true
+    selfBox:ClearFocus()
+    commitSplitFieldEdit(selfBox, field, resetCursor)
+end
+
+local SPLIT_NOTE_MAX_LETTERS = 255
+local SPLIT_ROLE_DROPDOWN_OPTIONS = {
+    { value = "мт", text = "МТ" },
+    { value = "от", text = "ОТ" },
+    { value = "хил", text = "Хил" },
+    { value = "дд", text = "ДД" },
+}
+
+local function ensureSplitRoleDropdown()
+    if addon.splitRoleDropdown then
+        return addon.splitRoleDropdown
+    end
+
+    addon.splitRoleDropdown = CreateFrame("Frame", "GoldBidSplitRoleDropdown", UIParent, "UIDropDownMenuTemplate")
+    return addon.splitRoleDropdown
+end
+
+local function showSplitRoleDropdown(button)
+    local dropdown
+
+    if not button or not button.playerName or not button.isMenuEnabled then
+        return
+    end
+
+    if not UIDropDownMenu_Initialize or not UIDropDownMenu_CreateInfo or not ToggleDropDownMenu then
+        return
+    end
+
+    addon.splitRoleDropdownContext = button
+    dropdown = ensureSplitRoleDropdown()
+
+    UIDropDownMenu_Initialize(dropdown, function(selfDropDown, level)
+        local context = addon.splitRoleDropdownContext
+        local info
+        local index
+        local selectedValue
+
+        if level ~= 1 or not context then
+            return
+        end
+
+        selectedValue = context.roleManual
+            and addon:NormalizeSplitRoleValue(context.roleValue)
+            or "__AUTO__"
+
+        info = UIDropDownMenu_CreateInfo()
+        info.text = "Авто (" .. tostring(addon:GetSplitRoleDisplayName(context.autoRole or "", false, false)) .. ")"
+        info.value = ""
+        info.checked = selectedValue == "__AUTO__"
+        info.isNotRadio = false
+        info.notCheckable = false
+        info.func = function()
+            addon:UpdateSplitEntryField(context.playerName, "role", "")
+        end
+        UIDropDownMenu_AddButton(info, level)
+
+        for index = 1, table.getn(SPLIT_ROLE_DROPDOWN_OPTIONS) do
+            local option = SPLIT_ROLE_DROPDOWN_OPTIONS[index]
+
+            info = UIDropDownMenu_CreateInfo()
+            info.text = option.text
+            info.value = option.value
+            info.checked = selectedValue == option.value
+            info.isNotRadio = false
+            info.notCheckable = false
+            info.func = function()
+                addon:UpdateSplitEntryField(context.playerName, "role", option.value)
+            end
+            UIDropDownMenu_AddButton(info, level)
+        end
+    end, "MENU")
+
+    ToggleDropDownMenu(1, nil, dropdown, button, 0, 0)
+end
+
 function addon:RefreshSplitView(frame)
     local split = self:ComputeDetailedSplit()
     local sourceRows = split and split.rows or {}
     local rows = {}
     local canEdit = self:IsPlayerController()
+    local classColors = CUSTOM_CLASS_COLORS or RAID_CLASS_COLORS or {}
     local contentWidth = math.max(648, math.floor(((frame.splitListPanel and frame.splitListPanel:GetWidth()) or 684) - 36))
     local indexLeft = 10
     local indexWidth = 18
     local playerLeft = 8
-    local playerWidth = 104
-    local specLeft = 118
-    local specWidth = 66
-    local roleLeft = 190
-    local roleWidth = 46
-    local percentLeft = 242
-    local percentWidth = 50
-    local debtWidth = 60
-    local netWidth = 60
-    local sentWidth = 24
-    local toggleWidth = 34
+    local leftColumnGap = 6
+    local rightColumnGap = 6
+    local noteFieldGap = 4
+    local noteButtonGap = 2
+    local playerWidth = 96
+    local specLeft = playerLeft + playerWidth + leftColumnGap
+    local specWidth = 60
+    local roleLeft = specLeft + specWidth + leftColumnGap
+    local roleWidth = 54
+    local percentLeft = roleLeft + roleWidth + leftColumnGap
+    local percentWidth = 44
+    local debtWidth = 54
+    local netWidth = 56
+    local sentWidth = 20
+    local toggleWidth = 30
     local presetWidth = 20
-    local sentLeft = contentWidth - sentWidth - 18
-    local netLeft = sentLeft - 8 - netWidth
-    local debtLeft = netLeft - 8 - debtWidth
-    local toggleLeft = debtLeft - 8 - toggleWidth
-    local notesStartLeft = percentLeft + percentWidth + 8
-    local noteAreaWidth = math.max(90, toggleLeft - notesStartLeft - 8)
-    local noteColumnWidth = math.max(40, math.floor((noteAreaWidth - presetWidth * 2 - 10) / 2))
+    local sentLeft = contentWidth - sentWidth - 14
+    local netLeft = sentLeft - rightColumnGap - netWidth
+    local debtLeft = netLeft - rightColumnGap - debtWidth
+    local toggleLeft = debtLeft - rightColumnGap - toggleWidth
+    local notesStartLeft = percentLeft + percentWidth + leftColumnGap
+    local noteAreaWidth = math.max(120, toggleLeft - notesStartLeft - rightColumnGap)
+    local noteColumnWidth = math.max(56, math.floor((noteAreaWidth - presetWidth * 2 - noteButtonGap * 2 - noteFieldGap) / 2))
     local penaltyNoteLeft = notesStartLeft
-    local penaltyButtonLeft = penaltyNoteLeft + noteColumnWidth + 2
-    local bonusNoteLeft = penaltyButtonLeft + presetWidth + 6
-    local bonusButtonLeft = bonusNoteLeft + noteColumnWidth + 2
+    local penaltyButtonLeft = penaltyNoteLeft + noteColumnWidth + noteButtonGap
+    local bonusNoteLeft = penaltyButtonLeft + presetWidth + noteFieldGap
+    local bonusButtonLeft = bonusNoteLeft + noteColumnWidth + noteButtonGap
+    local statsLeftWidth = 130
+    local statsRightWidth = 210
+    local statsCenterLeft = 10 + statsLeftWidth + 12
+    local statsCenterWidth = math.max(180, contentWidth - statsLeftWidth - statsRightWidth - 44)
     local rowCount
     local insertedSubstitutesHeader = false
     local index
@@ -2372,9 +2599,18 @@ function addon:RefreshSplitView(frame)
 
     rowCount = table.getn(rows)
     frame.splitContent:SetWidth(contentWidth)
+    frame.splitGrossText:ClearAllPoints()
+    frame.splitGrossText:SetPoint("LEFT", 10, 0)
+    frame.splitGrossText:SetWidth(statsLeftWidth)
+    frame.splitLeaderShareText:ClearAllPoints()
+    frame.splitLeaderShareText:SetPoint("LEFT", statsCenterLeft, 0)
+    frame.splitLeaderShareText:SetWidth(statsCenterWidth)
+    frame.splitBaseText:ClearAllPoints()
+    frame.splitBaseText:SetPoint("RIGHT", -10, 0)
+    frame.splitBaseText:SetWidth(statsRightWidth)
 
     if not frame.splitLeaderPercentBox:HasFocus() then
-        frame.splitLeaderPercentBox:SetText("0")
+        frame.splitLeaderPercentBox:SetText(tostring(math.floor(tonumber(split and split.leaderSharePercent or 0) or 0)))
     end
 
     frame.splitLeaderPercentBox:EnableMouse(false)
@@ -2384,6 +2620,30 @@ function addon:RefreshSplitView(frame)
     frame.splitLeaderShareText:SetText("")
     frame.splitBaseText:SetText("")
     frame.splitEmptyText:SetShown(rowCount == 0)
+
+    if rowCount > 0 then
+        frame.splitGrossText:SetText("Касса: " .. formatGold(split.totalPot or 0))
+        frame.splitLeaderShareText:SetText(string.format(
+            "Г %d%%: %s | РЛ %d%%: %s",
+            math.floor(tonumber(split.guildSharePercent or 0) or 0),
+            formatGold(split.guildShareAmount or 0),
+            math.floor(tonumber(split.leaderSharePercent or 0) or 0),
+            formatGold(split.leaderShareAmount or 0)
+        ))
+        frame.splitBaseText:SetText(string.format(
+            "Пул %d%%: %s | 100%%: %s",
+            math.floor(tonumber(split.playerSharePercent or 0) or 0),
+            formatGold(split.distributablePot or 0),
+            formatGold(split.baseShare or 0)
+        ))
+        frame.splitGrossText:Show()
+        frame.splitLeaderShareText:Show()
+        frame.splitBaseText:Show()
+    else
+        frame.splitGrossText:Hide()
+        frame.splitLeaderShareText:Hide()
+        frame.splitBaseText:Hide()
+    end
 
     if frame.mailPayoutButton then
         frame.mailPayoutButton:SetShown(canEdit and frame.activeTab == "split")
@@ -2479,42 +2739,39 @@ function addon:RefreshSplitView(frame)
             row.spec:SetJustifyH("CENTER")
             row.spec:SetTextColor(0.95, 0.82, 0.28)
 
-            row.roleBox = CreateFrame("EditBox", nil, row)
-            row.roleBox:SetPoint("LEFT", roleLeft, 0)
-            setupTextBox(row.roleBox, roleWidth, "")
-            row.roleBox:SetJustifyH("CENTER")
-            row.roleBox:SetScript("OnEnterPressed", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "role", selfBox:GetText())
-                selfBox:ClearFocus()
-            end)
-            row.roleBox:SetScript("OnEscapePressed", function(selfBox)
-                selfBox:ClearFocus()
-            end)
-            row.roleBox:SetScript("OnEditFocusLost", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "role", selfBox:GetText())
+            row.roleButton = CreateFrame("Button", nil, row)
+            row.roleButton:SetPoint("LEFT", roleLeft, 0)
+            setupSplitRoleSelector(row.roleButton, roleWidth)
+            row.roleButton:SetFrameLevel(row:GetFrameLevel() + 3)
+            row.roleButton:SetScript("OnClick", function(selfButton)
+                showSplitRoleDropdown(selfButton)
             end)
 
             row.percentBox = CreateFrame("EditBox", nil, row)
             row.percentBox:SetPoint("LEFT", percentLeft, 0)
             setupInputBox(row.percentBox, 50, "100")
             row.percentBox:SetScript("OnEnterPressed", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "percent", selfBox:GetText())
-                selfBox:ClearFocus()
+                clearFocusAndCommitSplitField(selfBox, "percent")
             end)
             row.percentBox:SetScript("OnEscapePressed", function(selfBox)
                 selfBox:ClearFocus()
             end)
             row.percentBox:SetScript("OnEditFocusLost", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "percent", selfBox:GetText())
+                if selfBox.skipNextFocusLostCommit then
+                    selfBox.skipNextFocusLostCommit = nil
+                    return
+                end
+
+                commitSplitFieldEdit(selfBox, "percent")
             end)
 
             row.penaltyNoteBox = CreateFrame("EditBox", nil, row)
             row.penaltyNoteBox:SetPoint("LEFT", penaltyNoteLeft, 0)
             setupTextBox(row.penaltyNoteBox, noteColumnWidth, "")
+            row.penaltyNoteBox:SetMaxLetters(SPLIT_NOTE_MAX_LETTERS)
             row.penaltyNoteBox:SetJustifyH("LEFT")
             row.penaltyNoteBox:SetScript("OnEnterPressed", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "penaltyNote", selfBox:GetText())
-                selfBox:ClearFocus()
+                clearFocusAndCommitSplitField(selfBox, "penaltyNote", true)
             end)
             row.penaltyNoteBox:SetScript("OnEscapePressed", function(selfBox)
                 selfBox:ClearFocus()
@@ -2523,9 +2780,10 @@ function addon:RefreshSplitView(frame)
                 end
             end)
             row.penaltyNoteBox:SetScript("OnEditFocusLost", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "penaltyNote", selfBox:GetText())
-                if selfBox.SetCursorPosition then
-                    selfBox:SetCursorPosition(0)
+                if selfBox.skipNextFocusLostCommit then
+                    selfBox.skipNextFocusLostCommit = nil
+                else
+                    commitSplitFieldEdit(selfBox, "penaltyNote", true)
                 end
             end)
 
@@ -2539,10 +2797,10 @@ function addon:RefreshSplitView(frame)
             row.bonusNoteBox = CreateFrame("EditBox", nil, row)
             row.bonusNoteBox:SetPoint("LEFT", bonusNoteLeft, 0)
             setupTextBox(row.bonusNoteBox, noteColumnWidth, "")
+            row.bonusNoteBox:SetMaxLetters(SPLIT_NOTE_MAX_LETTERS)
             row.bonusNoteBox:SetJustifyH("LEFT")
             row.bonusNoteBox:SetScript("OnEnterPressed", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "bonusNote", selfBox:GetText())
-                selfBox:ClearFocus()
+                clearFocusAndCommitSplitField(selfBox, "bonusNote", true)
             end)
             row.bonusNoteBox:SetScript("OnEscapePressed", function(selfBox)
                 selfBox:ClearFocus()
@@ -2551,9 +2809,10 @@ function addon:RefreshSplitView(frame)
                 end
             end)
             row.bonusNoteBox:SetScript("OnEditFocusLost", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "bonusNote", selfBox:GetText())
-                if selfBox.SetCursorPosition then
-                    selfBox:SetCursorPosition(0)
+                if selfBox.skipNextFocusLostCommit then
+                    selfBox.skipNextFocusLostCommit = nil
+                else
+                    commitSplitFieldEdit(selfBox, "bonusNote", true)
                 end
             end)
 
@@ -2575,14 +2834,18 @@ function addon:RefreshSplitView(frame)
             row.debtBox:SetPoint("LEFT", debtLeft, 0)
             setupInputBox(row.debtBox, 60, "0")
             row.debtBox:SetScript("OnEnterPressed", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "debt", selfBox:GetText())
-                selfBox:ClearFocus()
+                clearFocusAndCommitSplitField(selfBox, "debt")
             end)
             row.debtBox:SetScript("OnEscapePressed", function(selfBox)
                 selfBox:ClearFocus()
             end)
             row.debtBox:SetScript("OnEditFocusLost", function(selfBox)
-                addon:UpdateSplitEntryField(row.playerName, "debt", selfBox:GetText())
+                if selfBox.skipNextFocusLostCommit then
+                    selfBox.skipNextFocusLostCommit = nil
+                    return
+                end
+
+                commitSplitFieldEdit(selfBox, "debt")
             end)
 
             row.net = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -2623,9 +2886,9 @@ function addon:RefreshSplitView(frame)
         row.spec:ClearAllPoints()
         row.spec:SetPoint("LEFT", specLeft, 0)
         row.spec:SetWidth(specWidth)
-        row.roleBox:ClearAllPoints()
-        row.roleBox:SetPoint("LEFT", roleLeft, 0)
-        row.roleBox:SetWidth(roleWidth)
+        row.roleButton:ClearAllPoints()
+        row.roleButton:SetPoint("LEFT", roleLeft, 0)
+        row.roleButton:SetWidth(roleWidth)
         row.percentBox:ClearAllPoints()
         row.percentBox:SetPoint("LEFT", percentLeft, 0)
         row.percentBox:SetWidth(percentWidth)
@@ -2658,7 +2921,7 @@ function addon:RefreshSplitView(frame)
             row.index:Hide()
             row.name:Hide()
             row.spec:Hide()
-            row.roleBox:Hide()
+            row.roleButton:Hide()
             row.percentBox:Hide()
             row.penaltyNoteBox:Hide()
             row.penaltyButton:Hide()
@@ -2676,7 +2939,7 @@ function addon:RefreshSplitView(frame)
             row.index:Hide()
             row.name:Show()
             row.spec:Show()
-            row.roleBox:Show()
+            row.roleButton:Show()
             row.percentBox:Show()
             row.penaltyNoteBox:Show()
             row.penaltyButton:Show()
@@ -2689,20 +2952,37 @@ function addon:RefreshSplitView(frame)
         end
 
         if not data.separator then
+            local classToken = tostring(data.classToken or "")
+            local classColor = classColors[classToken]
+
             row.playerName = data.name
             row.isSubstitute = data.isSubstitute
             row.name:SetText(data.name)
             row.spec:SetText(data.spec ~= "" and tostring(data.spec) or "...")
 
-            if not row.roleBox:HasFocus() then
-                row.roleBox:SetText(tostring(data.role or ""))
+            if classColor then
+                row.name:SetTextColor(classColor.r or 1, classColor.g or 1, classColor.b or 1)
+            else
+                row.name:SetTextColor(1, 1, 1)
             end
 
+            row.roleButton.playerName = data.name
+            row.roleButton.roleValue = tostring(data.role or "")
+            row.roleButton.roleManual = data.roleManual and true or false
+            row.roleButton.autoRole = self:GetSplitAutoRole(data.name, data.spec)
+            setSplitRoleSelectorState(
+                row.roleButton,
+                self:GetSplitRoleDisplayName(data.role, data.isLeader, data.isSubstitute),
+                canEdit and not data.isLeader and not data.isSubstitute
+            )
+
             if not row.percentBox:HasFocus() then
+                row.percentBox.playerName = data.name
                 row.percentBox:SetText(tostring(data.percent or 0))
             end
 
             if not row.penaltyNoteBox:HasFocus() then
+                row.penaltyNoteBox.playerName = data.name
                 row.penaltyNoteBox:SetText(tostring(data.penaltyNote or ""))
                 if row.penaltyNoteBox.SetCursorPosition then
                     row.penaltyNoteBox:SetCursorPosition(0)
@@ -2710,6 +2990,7 @@ function addon:RefreshSplitView(frame)
             end
 
             if not row.bonusNoteBox:HasFocus() then
+                row.bonusNoteBox.playerName = data.name
                 row.bonusNoteBox:SetText(tostring(data.bonusNote or ""))
                 if row.bonusNoteBox.SetCursorPosition then
                     row.bonusNoteBox:SetCursorPosition(0)
@@ -2717,10 +2998,10 @@ function addon:RefreshSplitView(frame)
             end
 
             if not row.debtBox:HasFocus() then
+                row.debtBox.playerName = data.name
                 row.debtBox:SetText(tostring(data.debt or 0))
             end
 
-            row.roleBox:EnableMouse(canEdit)
             row.percentBox:EnableMouse(canEdit)
             row.penaltyNoteBox:EnableMouse(canEdit)
             row.penaltyButton:SetEnabled(canEdit)
@@ -2759,13 +3040,21 @@ function addon:CommitSplitViewEdits()
 
     for index = 1, table.getn(frame.splitRows) do
         local row = frame.splitRows[index]
+        local percentPlayerName
+        local penaltyPlayerName
+        local bonusPlayerName
+        local debtPlayerName
 
         if row and row.playerName and row:IsShown() and not row.separator then
-            self:UpdateSplitEntryField(row.playerName, "role", row.roleBox and row.roleBox:GetText() or "", true)
-            self:UpdateSplitEntryField(row.playerName, "percent", row.percentBox and row.percentBox:GetText() or "", true)
-            self:UpdateSplitEntryField(row.playerName, "penaltyNote", row.penaltyNoteBox and row.penaltyNoteBox:GetText() or "", true)
-            self:UpdateSplitEntryField(row.playerName, "bonusNote", row.bonusNoteBox and row.bonusNoteBox:GetText() or "", true)
-            self:UpdateSplitEntryField(row.playerName, "debt", row.debtBox and row.debtBox:GetText() or "", true)
+            percentPlayerName = (row.percentBox and row.percentBox.playerName) or row.playerName
+            penaltyPlayerName = (row.penaltyNoteBox and row.penaltyNoteBox.playerName) or row.playerName
+            bonusPlayerName = (row.bonusNoteBox and row.bonusNoteBox.playerName) or row.playerName
+            debtPlayerName = (row.debtBox and row.debtBox.playerName) or row.playerName
+
+            self:UpdateSplitEntryField(percentPlayerName, "percent", row.percentBox and row.percentBox:GetText() or "", true)
+            self:UpdateSplitEntryField(penaltyPlayerName, "penaltyNote", row.penaltyNoteBox and row.penaltyNoteBox:GetText() or "", true)
+            self:UpdateSplitEntryField(bonusPlayerName, "bonusNote", row.bonusNoteBox and row.bonusNoteBox:GetText() or "", true)
+            self:UpdateSplitEntryField(debtPlayerName, "debt", row.debtBox and row.debtBox:GetText() or "", true)
         end
     end
 
@@ -3376,8 +3665,8 @@ function addon:RefreshMainWindow()
     frame.startButton:SetText(isRollMode and "Старт Roll" or "Старт")
 
     if hasFullAccess then
-        leftWidth = 340
         passWidth = 140
+        leftWidth = math.min(460, math.max(340, math.floor((auctionWidth - passWidth - 24) * 0.62)))
         historyWidth = math.max(180, auctionWidth - leftWidth - passWidth - 24)
     else
         local compactContentWidth = math.max(280, auctionWidth - 12)
@@ -3395,6 +3684,7 @@ function addon:RefreshMainWindow()
 
     frame.tableHeader:SetWidth(leftWidth)
     frame.passHeader:SetShown(hasFullAccess)
+    frame.passHeader:SetWidth(passWidth)
     frame.historyHeader:SetWidth(historyWidth)
     frame.historyHeader.title:SetText(hasFullAccess and "Продажи" or "ПАС")
     frame.historyHeader:ClearAllPoints()
@@ -3479,8 +3769,8 @@ function addon:RefreshMainWindow()
         local row = frame.passRows[index]
 
         if hasFullAccess and index <= maxAuctionRows then
-            row:SetWidth(140)
-            row.name:SetWidth(118)
+            row:SetWidth(passWidth)
+            row.name:SetWidth(math.max(60, passWidth - 22))
             row:ClearAllPoints()
             row:SetPoint("TOPLEFT", frame.passHeader, "BOTTOMLEFT", 0, -((index - 1) * 26) - 6)
             row.name:SetText(passes[index] or "")
@@ -3518,8 +3808,8 @@ function addon:RefreshMainWindow()
 
     frame.summaryPotText:SetText("Касса рейда: " .. formatGold(GoldBidDB.ledger.pot or 0))
     frame.summaryLotsText:SetText("Лотов продано: " .. tostring(saleCount))
-    if payout then
-        frame.summarySplitText:SetText("Сплит: " .. formatGold(payout.perPlayer or 0))
+    if split and split.rows and table.getn(split.rows) > 0 then
+        frame.summarySplitText:SetText("База 100%: " .. formatGold(split.baseShare or 0))
     else
         frame.summarySplitText:SetText("Сплит: не рассчитан")
     end
@@ -3612,8 +3902,8 @@ function addon:RefreshMainWindow()
         frame.footerText:SetText("Лут: " .. tostring(lootSummary.totalCount or 0) .. " | Срочно: " .. tostring(lootSummary.urgentCount or 0))
     elseif frame.activeTab == "damage" then
         frame.footerText:SetText("Босс: " .. tostring(damageSummary.segmentName or "-") .. " | Игроков: " .. tostring(damageSummary.playerCount or 0))
-    elseif payout then
-        frame.footerText:SetText("Режим: " .. self:GetAuctionModeDisplayName(auctionMode) .. " | Сплит: " .. formatGold(payout.perPlayer or 0))
+    elseif split and split.rows and table.getn(split.rows) > 0 then
+        frame.footerText:SetText("Режим: " .. self:GetAuctionModeDisplayName(auctionMode) .. " | База 100%: " .. formatGold(split.baseShare or 0))
     else
         frame.footerText:SetText("Режим: " .. self:GetAuctionModeDisplayName(auctionMode))
     end
