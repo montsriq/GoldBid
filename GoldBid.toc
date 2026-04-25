@@ -11,5 +11,13 @@ Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
 Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
 
 Core.lua
+CoreAntiSnipe.lua
+CoreSyncStatus.lua
+CoreDebt.lua
 UI.lua
+UIExport.lua
+CoreEvents.lua
 RaidLeader.lua
+
+
+

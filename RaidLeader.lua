@@ -85,6 +85,11 @@ SlashCmdList["GOLDBID"] = function(message)
         return
     end
 
+    if command == "version" or command == "versions" then
+        addon:RequestVersionReport()
+        return
+    end
+
     if command == "export" then
         addon:ShowExportWindow()
         return
@@ -104,10 +109,16 @@ SlashCmdList["GOLDBID"] = function(message)
         return
     end
 
+    if command == "debt" or command == "debts" then
+        addon:SetMainTab("debt")
+        addon:ShowMainWindow(true)
+        return
+    end
+
     if command == "mail" then
         addon:StartMailPayout(false)
         return
     end
 
-    addon:Print("Команды: /gbid, /gbid show, /gbid settings, /gbid item [ссылка], /gbid mode goldbid|roll, /gbid start [мин] [шаг] [сек], /gbid bid [сумма], /gbid pass, /gbid end, /gbid sync, /gbid export, /gbid split, /gbid mail")
+    addon:Print("Команды: /gbid, /gbid show, /gbid settings, /gbid item [ссылка], /gbid mode goldbid|roll, /gbid start [мин] [шаг] [сек], /gbid bid [сумма], /gbid pass, /gbid end, /gbid sync, /gbid version, /gbid export, /gbid split, /gbid debt, /gbid mail")
 end

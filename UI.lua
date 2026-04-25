@@ -74,6 +74,36 @@ local function setupInputBox(editBox, width, text)
     editBox:SetText(text or "")
 end
 
+local function setInputBoxEnabled(editBox, enabled)
+    if not editBox then
+        return
+    end
+
+    enabled = enabled and true or false
+
+    if not enabled and editBox.HasFocus and editBox:HasFocus() and editBox.ClearFocus then
+        editBox:ClearFocus()
+    end
+
+    if editBox.EnableMouse then
+        editBox:EnableMouse(enabled)
+    end
+
+    if editBox.EnableKeyboard then
+        editBox:EnableKeyboard(enabled)
+    end
+
+    if editBox.SetBackdropColor and editBox.SetBackdropBorderColor then
+        if enabled then
+            editBox:SetBackdropColor(0.07, 0.07, 0.09, 0.96)
+            editBox:SetBackdropBorderColor(0.45, 0.1, 0.1, 0.9)
+        else
+            editBox:SetBackdropColor(0.05, 0.05, 0.07, 0.88)
+            editBox:SetBackdropBorderColor(0.3, 0.09, 0.09, 0.75)
+        end
+    end
+end
+
 local function setupTextBox(editBox, width, text)
     skinInputBox(editBox)
     editBox:SetSize(width, 18)
@@ -379,80 +409,9 @@ function addon:ApplySuggestedMinBidForPendingItem(frame, itemLink)
     end
 end
 
-function addon:CreateExportWindow()
-    local frame, title, closeButton, scrollFrame, editBox, doneButton
-
-    if self.exportFrame then
-        return self.exportFrame
-    end
-
-    frame = CreateFrame("Frame", "GoldBidExportFrame", UIParent)
-    frame:SetSize(560, 420)
-    frame:SetPoint("CENTER", 0, 20)
-    frame:SetFrameStrata("DIALOG")
-    frame:SetMovable(true)
-    frame:EnableMouse(true)
-    frame:RegisterForDrag("LeftButton")
-    frame:SetScript("OnDragStart", frame.StartMoving)
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
-    createBackdrop(frame, { 0.03, 0.03, 0.05, 0.98 }, { 0.7, 0.08, 0.08, 1 })
-    frame:Hide()
-
-    title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    title:SetPoint("TOPLEFT", 14, -14)
-    title:SetText("Экспорт журнала GDKP")
-
-    closeButton = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
-    closeButton:SetPoint("TOPRIGHT", 2, 2)
-    closeButton:SetScript("OnClick", function()
-        frame:Hide()
-    end)
-
-    scrollFrame = CreateFrame("ScrollFrame", "GoldBidExportScrollFrame", frame, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", 16, -42)
-    scrollFrame:SetPoint("BOTTOMRIGHT", -34, 46)
-
-    editBox = CreateFrame("EditBox", "GoldBidExportEditBox", frame)
-    editBox:SetMultiLine(true)
-    editBox:SetAutoFocus(false)
-    editBox:SetFontObject(GameFontHighlightSmall)
-    editBox:SetWidth(490)
-    editBox:SetTextInsets(10, 10, 10, 10)
-    editBox:SetJustifyH("LEFT")
-    editBox:SetTextColor(1, 0.95, 0.8)
-    if editBox.SetSpacing then
-        editBox:SetSpacing(1)
-    end
-    editBox:SetScript("OnEscapePressed", function()
-        frame:Hide()
-    end)
-    editBox:SetScript("OnTextChanged", function(selfBox)
-        scrollFrame:UpdateScrollChildRect()
-    end)
-
-    editBox.bg = editBox:CreateTexture(nil, "BACKGROUND")
-    editBox.bg:SetAllPoints(true)
-    editBox.bg:SetTexture(0.08, 0.08, 0.1, 0.92)
-
-    scrollFrame:SetScrollChild(editBox)
-
-    doneButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    doneButton:SetSize(100, 24)
-    doneButton:SetPoint("BOTTOM", 0, 14)
-    doneButton:SetText("Закрыть")
-    doneButton:SetScript("OnClick", function()
-        frame:Hide()
-    end)
-
-    frame.scrollFrame = scrollFrame
-    frame.editBox = editBox
-    self.exportFrame = frame
-    return frame
-end
-
 if not StaticPopupDialogs["GOLDBID_RESET_CONFIRM"] then
     StaticPopupDialogs["GOLDBID_RESET_CONFIRM"] = {
-        text = "Сбросить все данные GoldBid?\n\nБудут очищены аукцион, продажи, касса и делёжка.",
+        text = "Сбросить все данные GoldBid?\n\nБудут очищены аукцион, продажи, лут, касса и делёжка.",
         button1 = "Сбросить",
         button2 = "Отмена",
         OnAccept = function()
@@ -553,19 +512,28 @@ if not StaticPopupDialogs["GOLDBID_DELETE_SALE_CONFIRM"] then
     }
 end
 
-function addon:ShowExportWindow()
-    local frame = self:CreateExportWindow()
-    local text = self:BuildExportText()
-    local lines = 1
+if not StaticPopupDialogs["GOLDBID_REMOVE_SPLIT_PLAYER_CONFIRM"] then
+    StaticPopupDialogs["GOLDBID_REMOVE_SPLIT_PLAYER_CONFIRM"] = {
+        text = "Удалить игрока из делёжки?\n\nИгрок будет исключён из расчёта выплат до сброса данных рейда.",
+        button1 = "Удалить",
+        button2 = "Отмена",
+        OnAccept = function()
+            local playerName = addon.pendingSplitPlayerDeleteName
 
-    text = text or ""
-    text = string.gsub(text, "\r\n", "\n")
-    lines = select(2, string.gsub(text, "\n", "\n")) + 1
+            if playerName then
+                addon:RemoveSplitPlayer(playerName)
+            end
 
-    frame.editBox:SetText(text)
-    frame.editBox:SetHeight(math.max(260, lines * 16 + 20))
-    frame.editBox:HighlightText()
-    frame:Show()
+            addon.pendingSplitPlayerDeleteName = nil
+        end,
+        OnCancel = function()
+            addon.pendingSplitPlayerDeleteName = nil
+        end,
+        timeout = 0,
+        whileDead = 1,
+        hideOnEscape = 1,
+        preferredIndex = 3,
+    }
 end
 
 function addon:IsAuctionWindowSuppressed(auctionId)
@@ -627,6 +595,31 @@ function addon:ConfirmDeleteSale(index)
 
     self.pendingSaleDeleteIndex = index
     StaticPopup_Show("GOLDBID_DELETE_SALE_CONFIRM")
+end
+
+function addon:ConfirmRemoveSplitPlayer(name)
+    name = normalizeName(name)
+
+    if not self:IsPlayerController() then
+        self:Print("Удалять игроков из делёжки может только мастер лутер.")
+        return
+    end
+
+    if not name then
+        return
+    end
+
+    if name == normalizeName(self:GetLeaderName() or self:GetPlayerName()) then
+        self:Print("РЛ нельзя удалить из делёжки.")
+        return
+    end
+
+    if self.CommitSplitViewEdits then
+        self:CommitSplitViewEdits()
+    end
+
+    self.pendingSplitPlayerDeleteName = name
+    StaticPopup_Show("GOLDBID_REMOVE_SPLIT_PLAYER_CONFIRM")
 end
 
 function addon:ConfirmOrStartAuction(itemLink, minBid, increment, duration)
@@ -762,15 +755,39 @@ function addon:RefreshModeDropdown()
     frame.lastModeDropdownCanChange = canChangeMode
 end
 
+local function commitAntiSnipeSettings(frame)
+    local settings
+    local threshold
+    local extension
+    local maxExtensions
+
+    if not frame then
+        return
+    end
+
+    settings = addon:GetAntiSnipeSettings()
+    threshold = parseNumberText(frame.antiSnipeThresholdBox:GetText()) or settings.threshold
+    extension = parseNumberText(frame.antiSnipeExtensionBox:GetText()) or settings.extension
+    maxExtensions = parseNumberText(frame.antiSnipeMaxBox:GetText()) or settings.maxExtensions
+
+    addon:SetAntiSnipeSettings(
+        threshold,
+        extension,
+        maxExtensions,
+        frame.antiSnipeAnnounceCheck:GetChecked()
+    )
+end
+
 function addon:CreateSettingsWindow()
     local frame, title, closeButton, autoStartCheck, minimapCheck, controllerLabel, controllerDropDown
+    local antiSnipeLabel, thresholdLabel, extensionLabel, maxExtensionsLabel, antiSnipeAnnounceCheck
 
     if self.settingsFrame then
         return self.settingsFrame
     end
 
     frame = CreateFrame("Frame", "GoldBidSettingsFrame", UIParent)
-    frame:SetSize(360, 280)
+    frame:SetSize(400, 390)
     frame:SetPoint("CENTER", 0, 10)
     frame:SetFrameStrata("DIALOG")
     frame:SetMovable(true)
@@ -821,12 +838,63 @@ function addon:CreateSettingsWindow()
 
     frame.note = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     frame.note:SetPoint("TOPLEFT", minimapCheck, "BOTTOMLEFT", 6, -10)
-    frame.note:SetWidth(316)
+    frame.note:SetWidth(356)
     frame.note:SetJustifyH("LEFT")
     frame.note:SetText("Аукцион запускается только кнопкой Старт. Перетаскивание предмета лишь подставляет лот в окно.")
 
+    antiSnipeLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    antiSnipeLabel:SetPoint("TOPLEFT", frame.note, "BOTTOMLEFT", -6, -18)
+    antiSnipeLabel:SetText("Антиснайпинг")
+
+    thresholdLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    thresholdLabel:SetPoint("TOPLEFT", antiSnipeLabel, "BOTTOMLEFT", 0, -8)
+    thresholdLabel:SetWidth(105)
+    thresholdLabel:SetJustifyH("CENTER")
+    thresholdLabel:SetText("Порог, сек")
+
+    frame.antiSnipeThresholdBox = CreateFrame("EditBox", nil, frame)
+    setupInputBox(frame.antiSnipeThresholdBox, 74, "15")
+    frame.antiSnipeThresholdBox:SetPoint("TOPLEFT", thresholdLabel, "BOTTOMLEFT", 16, -4)
+    frame.antiSnipeThresholdBox:SetScript("OnEditFocusLost", function()
+        commitAntiSnipeSettings(frame)
+    end)
+
+    extensionLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    extensionLabel:SetPoint("LEFT", thresholdLabel, "RIGHT", 10, 0)
+    extensionLabel:SetWidth(105)
+    extensionLabel:SetJustifyH("CENTER")
+    extensionLabel:SetText("Остаток, сек")
+
+    frame.antiSnipeExtensionBox = CreateFrame("EditBox", nil, frame)
+    setupInputBox(frame.antiSnipeExtensionBox, 74, "15")
+    frame.antiSnipeExtensionBox:SetPoint("TOPLEFT", extensionLabel, "BOTTOMLEFT", 16, -4)
+    frame.antiSnipeExtensionBox:SetScript("OnEditFocusLost", function()
+        commitAntiSnipeSettings(frame)
+    end)
+
+    maxExtensionsLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    maxExtensionsLabel:SetPoint("LEFT", extensionLabel, "RIGHT", 10, 0)
+    maxExtensionsLabel:SetWidth(125)
+    maxExtensionsLabel:SetJustifyH("CENTER")
+    maxExtensionsLabel:SetText("Лимит (0=без)")
+
+    frame.antiSnipeMaxBox = CreateFrame("EditBox", nil, frame)
+    setupInputBox(frame.antiSnipeMaxBox, 74, "0")
+    frame.antiSnipeMaxBox:SetPoint("TOPLEFT", maxExtensionsLabel, "BOTTOMLEFT", 25, -4)
+    frame.antiSnipeMaxBox:SetScript("OnEditFocusLost", function()
+        commitAntiSnipeSettings(frame)
+    end)
+
+    antiSnipeAnnounceCheck = CreateFrame("CheckButton", "GoldBidAntiSnipeAnnounceCheck", frame, "UICheckButtonTemplate")
+    antiSnipeAnnounceCheck:SetPoint("TOPLEFT", frame.antiSnipeThresholdBox, "BOTTOMLEFT", -4, -8)
+    antiSnipeAnnounceCheck.text = _G[antiSnipeAnnounceCheck:GetName() .. "Text"]
+    antiSnipeAnnounceCheck.text:SetText("Объявлять продление в рейд-чат")
+    antiSnipeAnnounceCheck:SetScript("OnClick", function()
+        commitAntiSnipeSettings(frame)
+    end)
+
     controllerLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    controllerLabel:SetPoint("TOPLEFT", frame.note, "BOTTOMLEFT", -6, -18)
+    controllerLabel:SetPoint("TOPLEFT", antiSnipeAnnounceCheck, "BOTTOMLEFT", 4, -18)
     controllerLabel:SetText("Кто ведёт торги")
 
     controllerDropDown = CreateFrame("Frame", "GoldBidControllerDropDown", frame, "UIDropDownMenuTemplate")
@@ -842,6 +910,7 @@ function addon:CreateSettingsWindow()
 
     frame.autoStartCheck = autoStartCheck
     frame.minimapCheck = minimapCheck
+    frame.antiSnipeAnnounceCheck = antiSnipeAnnounceCheck
     frame.controllerDropDown = controllerDropDown
     self.settingsFrame = frame
     return frame
@@ -849,10 +918,17 @@ end
 
 function addon:ShowSettingsWindow()
     local frame = self:CreateSettingsWindow()
+    local antiSnipeSettings
+
     self:EnsureDB()
+    antiSnipeSettings = self:GetAntiSnipeSettings()
     frame.autoStartCheck:SetChecked(true)
     frame.autoStartCheck:Disable()
     frame.minimapCheck:SetChecked(not (GoldBidDB and GoldBidDB.ui and GoldBidDB.ui.minimap and GoldBidDB.ui.minimap.hide))
+    frame.antiSnipeThresholdBox:SetText(tostring(antiSnipeSettings.threshold))
+    frame.antiSnipeExtensionBox:SetText(tostring(antiSnipeSettings.extension))
+    frame.antiSnipeMaxBox:SetText(tostring(antiSnipeSettings.maxExtensions))
+    frame.antiSnipeAnnounceCheck:SetChecked(antiSnipeSettings.announce)
     self:RefreshControllerDropdown()
     frame:Show()
 end
@@ -949,6 +1025,7 @@ function addon:UpdateMainWindowLayout()
     local hasFullAccess = self:HasFullInterfaceAccess()
     local isExpanded = hasFullAccess or frame.compactSectionOpen
     local isRollMode = self:GetCurrentAuctionMode() == "roll"
+    local hideAuctionControls = hasFullAccess and frame.activeTab == "split"
     local compactHeight
 
     if not hasFullAccess and frame.activeTab == "split" then
@@ -956,6 +1033,10 @@ function addon:UpdateMainWindowLayout()
     end
 
     if not hasFullAccess and frame.activeTab == "spend" then
+        frame.activeTab = "auction"
+    end
+
+    if not hasFullAccess and frame.activeTab == "debt" then
         frame.activeTab = "auction"
     end
 
@@ -976,6 +1057,7 @@ function addon:UpdateMainWindowLayout()
     frame.compactTabsBar:SetShown(not hasFullAccess)
     frame.compactPotText:SetShown(false)
     frame.header:SetShown(hasFullAccess)
+    frame.controlsPanel:SetShown(not hideAuctionControls)
     frame.compactCloseButton:SetShown(not hasFullAccess)
     frame.compactSkipButton:SetShown(not hasFullAccess)
     frame.infoBar:SetShown(hasFullAccess)
@@ -984,10 +1066,12 @@ function addon:UpdateMainWindowLayout()
     frame.auctionTabButton:SetShown(hasFullAccess)
     frame.summaryTabButton:SetShown(hasFullAccess)
     frame.spendTabButton:SetShown(hasFullAccess)
+    frame.debtTabButton:SetShown(hasFullAccess)
     frame.lootTabButton:SetShown(hasFullAccess)
     frame.damageTabButton:SetShown(hasFullAccess)
     frame.splitTabButton:SetShown(hasFullAccess)
     frame.spendView:SetShown(hasFullAccess and frame.activeTab == "spend")
+    frame.debtView:SetShown(hasFullAccess and frame.activeTab == "debt")
     frame.lootView:SetShown(hasFullAccess and frame.activeTab == "loot")
     frame.damageView:SetShown(hasFullAccess and frame.activeTab == "damage")
     frame.splitView:SetShown(hasFullAccess and frame.activeTab == "split")
@@ -995,6 +1079,13 @@ function addon:UpdateMainWindowLayout()
     frame.footerPanel:SetShown(hasFullAccess and isExpanded)
     frame.resetButton:SetShown(self:IsPlayerController())
     frame.resizeHandle:SetShown(hasFullAccess)
+
+    if frame.mailPayoutButton then
+        local canShowMailPayout = hasFullAccess and self:IsPlayerController() and isExpanded and frame.activeTab == "split"
+
+        frame.mailPayoutButton:SetShown(canShowMailPayout)
+        frame.mailPayoutButton:SetEnabled(canShowMailPayout)
+    end
 
     frame.startButton:SetShown(hasFullAccess)
     frame.endButton:SetShown(hasFullAccess)
@@ -1009,12 +1100,11 @@ function addon:UpdateMainWindowLayout()
         local buttonWidth = 96
         local buttonGap = 10
         local buttonBlockWidth = (buttonWidth * 2) + buttonGap
-        local addStepWidth = (frame.addStepButton and frame.addStepButton:GetWidth()) or 26
         local buttonColumnLeft = math.max(522, controlsWidth - buttonBlockWidth - 12)
         local availableFieldSpace = buttonColumnLeft - fieldBaseLeft - 24
         local fieldWidth = math.max(90, math.min(120,
-            math.floor((availableFieldSpace - fieldGap - addStepWidth - 6) / 2)))
-        local usedFieldSpace = (fieldWidth * 2) + fieldGap + addStepWidth + 6
+            math.floor((availableFieldSpace - fieldGap) / 2)))
+        local usedFieldSpace = (fieldWidth * 2) + fieldGap
         local fieldStartLeft = fieldBaseLeft + math.max(0, math.floor((availableFieldSpace - usedFieldSpace) / 2))
         local secondFieldLeft = fieldStartLeft + fieldWidth + fieldGap
 
@@ -1046,7 +1136,11 @@ function addon:UpdateMainWindowLayout()
         frame.compactTabsBar:SetPoint("BOTTOMLEFT", 14, 10)
         frame.compactTabsBar:SetPoint("BOTTOMRIGHT", -14, 10)
         frame.compactTabsBar:SetHeight(24)
-        frame.tablesPanel:SetPoint("TOPLEFT", 12, -222)
+        if hideAuctionControls then
+            frame.tablesPanel:SetPoint("TOPLEFT", 12, -58)
+        else
+            frame.tablesPanel:SetPoint("TOPLEFT", 12, -222)
+        end
         frame.tablesPanel:SetPoint("BOTTOMRIGHT", -12, 58)
         frame.footerPanel:SetPoint("BOTTOMLEFT", 12, 12)
         frame.footerPanel:SetPoint("BOTTOMRIGHT", -12, 12)
@@ -1135,8 +1229,7 @@ function addon:UpdateMainWindowLayout()
         local compactTopRowLabel = -12
         local compactBottomRowLabel = -46
         local compactButtonWidth = 84
-        local compactLeftButtonsLeft = 274
-        local compactRightButtonsLeft = 366
+        local compactLeftButtonsLeft = 242
         local compactButtonsTop = -10
         local compactButtonHeight = 24
         local compactButtonGapY = 25
@@ -1152,7 +1245,7 @@ function addon:UpdateMainWindowLayout()
         frame.footerPanel:SetBackdropColor(0, 0, 0, 0)
         frame.footerPanel:SetBackdropBorderColor(0, 0, 0, 0)
         frame:SetResizable(false)
-        frame:SetWidth(402)
+        frame:SetWidth(370)
         frame:SetHeight(132)
         frame.controlsPanel:ClearAllPoints()
         frame.controlsPanel:SetPoint("TOPLEFT", 10, -6)
@@ -1193,8 +1286,6 @@ function addon:UpdateMainWindowLayout()
         frame.incrementLabel:SetPoint("TOPLEFT", compactSecondColumnLeft, compactTopRowLabel)
         frame.durationLabel:SetPoint("TOPLEFT", compactFirstColumnLeft, compactBottomRowLabel)
         frame.bidLabel:SetPoint("TOPLEFT", compactSecondColumnLeft, compactBottomRowLabel)
-        frame.addStepButton:ClearAllPoints()
-        frame.addStepButton:SetPoint("LEFT", frame.bidBox, "RIGHT", 8, -1)
         -- Кнопки клиента: одна колонка Ставка/Пас/Торги
         frame.syncButton:Hide()
         frame.bidButton:SetSize(compactButtonWidth, compactButtonHeight)
@@ -1213,7 +1304,7 @@ function addon:UpdateMainWindowLayout()
         frame.compactPotText:SetWidth(150)
     end
 
-    frame.addStepButton:SetShown(not isRollMode)
+    frame.addStepButton:Hide()
 end
 
 function addon:SetMainTab(tabName, preserveState)
@@ -1221,7 +1312,7 @@ function addon:SetMainTab(tabName, preserveState)
     local activeTab = "auction"
     local hasFullAccess = self:HasFullInterfaceAccess()
 
-    if tabName == "summary" or (hasFullAccess and (tabName == "split" or tabName == "spend" or tabName == "loot" or tabName == "damage")) then
+    if tabName == "summary" or (hasFullAccess and (tabName == "split" or tabName == "spend" or tabName == "debt" or tabName == "loot" or tabName == "damage")) then
         activeTab = tabName
     end
 
@@ -1251,6 +1342,10 @@ function addon:SetMainTab(tabName, preserveState)
         frame.spendView:SetShown(hasFullAccess and frame.activeTab == "spend")
     end
 
+    if frame.debtView then
+        frame.debtView:SetShown(hasFullAccess and frame.activeTab == "debt")
+    end
+
     if frame.lootView then
         frame.lootView:SetShown(hasFullAccess and frame.activeTab == "loot")
     end
@@ -1266,12 +1361,20 @@ function addon:SetMainTab(tabName, preserveState)
     setTabButtonState(frame.auctionTabButton, frame.activeTab == "auction")
     setTabButtonState(frame.summaryTabButton, frame.activeTab == "summary")
     setTabButtonState(frame.spendTabButton, frame.activeTab == "spend")
+    setTabButtonState(frame.debtTabButton, frame.activeTab == "debt")
     setTabButtonState(frame.lootTabButton, frame.activeTab == "loot")
     setTabButtonState(frame.damageTabButton, frame.activeTab == "damage")
     setTabButtonState(frame.splitTabButton, frame.activeTab == "split")
     setTabButtonState(frame.compactAuctionButton, frame.compactSectionOpen and frame.activeTab == "auction")
     setTabButtonState(frame.compactSummaryButton, frame.compactSectionOpen and frame.activeTab == "summary")
     self:UpdateMainWindowLayout()
+    -- Немедленно рендерим новую вкладку — OnUpdate мог задержать обновление до 0.5с.
+    -- Защита от рекурсии: RefreshMainWindow может вызвать SetMainTab снова.
+    if self.frame and self.RefreshMainWindow and not self.inSetMainTab then
+        self.inSetMainTab = true
+        self:RefreshMainWindow()
+        self.inSetMainTab = nil
+    end
 end
 
 function addon:UpdateMinimapButtonPosition()
@@ -1360,6 +1463,7 @@ function addon:CreateMainWindow()
     local passRows = {}
     local summaryRows = {}
     local spendingRows = {}
+    local debtRows = {}
     local lootRows = {}
     local damageRows = {}
     local splitRows = {}
@@ -1509,9 +1613,17 @@ function addon:CreateMainWindow()
         addon:SetMainTab("spend")
     end)
 
+    frame.debtTabButton = CreateFrame("Button", nil, tablesPanel, "UIPanelButtonTemplate")
+    frame.debtTabButton:SetSize(84, 22)
+    frame.debtTabButton:SetPoint("LEFT", frame.spendTabButton, "RIGHT", 8, 0)
+    frame.debtTabButton:SetText("Долги")
+    frame.debtTabButton:SetScript("OnClick", function()
+        addon:SetMainTab("debt")
+    end)
+
     frame.lootTabButton = CreateFrame("Button", nil, tablesPanel, "UIPanelButtonTemplate")
     frame.lootTabButton:SetSize(84, 22)
-    frame.lootTabButton:SetPoint("LEFT", frame.spendTabButton, "RIGHT", 8, 0)
+    frame.lootTabButton:SetPoint("LEFT", frame.debtTabButton, "RIGHT", 8, 0)
     frame.lootTabButton:SetText("Лут")
     frame.lootTabButton:SetScript("OnClick", function()
         addon:SetMainTab("loot")
@@ -1544,6 +1656,10 @@ function addon:CreateMainWindow()
     frame.spendView = CreateFrame("Frame", nil, tablesPanel)
     frame.spendView:SetPoint("TOPLEFT", 12, -40)
     frame.spendView:SetPoint("BOTTOMRIGHT", -12, 12)
+
+    frame.debtView = CreateFrame("Frame", nil, tablesPanel)
+    frame.debtView:SetPoint("TOPLEFT", 12, -40)
+    frame.debtView:SetPoint("BOTTOMRIGHT", -12, 12)
 
     frame.lootView = CreateFrame("Frame", nil, tablesPanel)
     frame.lootView:SetPoint("TOPLEFT", 12, -40)
@@ -1781,6 +1897,7 @@ function addon:CreateMainWindow()
     addStepButton:SetScript("OnLeave", function()
         GameTooltip:Hide()
     end)
+    addStepButton:Hide()
 
     bidButton = CreateFrame("Button", nil, controlsPanel, "UIPanelButtonTemplate")
     bidButton:SetSize(96, 22)
@@ -1991,6 +2108,12 @@ function addon:CreateMainWindow()
     frame.summaryHeader.amount:SetPoint("RIGHT", -18, 0)
     frame.summaryHeader.amount:SetText("Цена")
 
+    frame.summaryHeader.paid = frame.summaryHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.summaryHeader.paid:SetText("Отдано")
+
+    frame.summaryHeader.debt = frame.summaryHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.summaryHeader.debt:SetText("Должен")
+
     frame.summaryListPanel = CreateFrame("Frame", nil, frame.summaryView)
     frame.summaryListPanel:SetPoint("TOPLEFT", frame.summaryHeader, "BOTTOMLEFT", 0, -6)
     frame.summaryListPanel:SetPoint("BOTTOMRIGHT", 0, 0)
@@ -2004,6 +2127,67 @@ function addon:CreateMainWindow()
     frame.summaryContent:SetWidth(620)
     frame.summaryContent:SetHeight(1)
     frame.summaryScrollFrame:SetScrollChild(frame.summaryContent)
+
+    frame.debtStatsBar = CreateFrame("Frame", nil, frame.debtView)
+    frame.debtStatsBar:SetPoint("TOPLEFT", 0, 0)
+    frame.debtStatsBar:SetPoint("TOPRIGHT", 0, 0)
+    frame.debtStatsBar:SetHeight(28)
+    createBackdrop(frame.debtStatsBar, { 0.12, 0.03, 0.03, 0.88 }, { 0.45, 0.1, 0.1, 0.8 })
+
+    frame.debtTotalText = frame.debtStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.debtTotalText:SetPoint("LEFT", 10, 0)
+    frame.debtTotalText:SetWidth(240)
+    frame.debtTotalText:SetJustifyH("LEFT")
+    frame.debtTotalText:SetTextColor(0.95, 0.82, 0.28)
+
+    frame.debtCountText = frame.debtStatsBar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.debtCountText:SetPoint("RIGHT", -10, 0)
+    frame.debtCountText:SetWidth(300)
+    frame.debtCountText:SetJustifyH("RIGHT")
+    frame.debtCountText:SetTextColor(0.95, 0.82, 0.28)
+
+    frame.debtHeader = CreateFrame("Frame", nil, frame.debtView)
+    frame.debtHeader:SetPoint("TOPLEFT", frame.debtStatsBar, "BOTTOMLEFT", 0, -8)
+    frame.debtHeader:SetPoint("TOPRIGHT", frame.debtStatsBar, "BOTTOMRIGHT", 0, -8)
+    frame.debtHeader:SetHeight(24)
+    createBackdrop(frame.debtHeader, { 0.18, 0.03, 0.03, 0.95 }, { 0.55, 0.1, 0.1, 1 })
+
+    frame.debtHeader.item = frame.debtHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.debtHeader.item:SetPoint("LEFT", 12, 0)
+    frame.debtHeader.item:SetText("Лот")
+
+    frame.debtHeader.winner = frame.debtHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.debtHeader.winner:SetText("Игрок")
+
+    frame.debtHeader.amount = frame.debtHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.debtHeader.amount:SetText("Цена")
+
+    frame.debtHeader.paid = frame.debtHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.debtHeader.paid:SetText("Отдано")
+
+    frame.debtHeader.debt = frame.debtHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.debtHeader.debt:SetText("Долг")
+
+    frame.debtHeader.action = frame.debtHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    frame.debtHeader.action:SetText("Напом.")
+
+    frame.debtListPanel = CreateFrame("Frame", nil, frame.debtView)
+    frame.debtListPanel:SetPoint("TOPLEFT", frame.debtHeader, "BOTTOMLEFT", 0, -6)
+    frame.debtListPanel:SetPoint("BOTTOMRIGHT", 0, 0)
+    createBackdrop(frame.debtListPanel, { 0.05, 0.05, 0.08, 0.75 }, { 0.25, 0.08, 0.08, 0.8 })
+
+    frame.debtScrollFrame = CreateFrame("ScrollFrame", "GoldBidDebtScrollFrame", frame.debtListPanel, "UIPanelScrollFrameTemplate")
+    frame.debtScrollFrame:SetPoint("TOPLEFT", 4, -4)
+    frame.debtScrollFrame:SetPoint("BOTTOMRIGHT", -28, 4)
+
+    frame.debtContent = CreateFrame("Frame", nil, frame.debtScrollFrame)
+    frame.debtContent:SetWidth(620)
+    frame.debtContent:SetHeight(1)
+    frame.debtScrollFrame:SetScrollChild(frame.debtContent)
+
+    frame.debtEmptyText = frame.debtListPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    frame.debtEmptyText:SetPoint("CENTER", 0, 0)
+    frame.debtEmptyText:SetText("Долгов нет")
 
     frame.summaryEmptyText = frame.summaryContent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     frame.summaryEmptyText:SetPoint("TOPLEFT", 12, -10)
@@ -2347,7 +2531,7 @@ function addon:CreateMainWindow()
         StaticPopup_Show("GOLDBID_RESET_CONFIRM")
     end)
 
-    splitMailButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    splitMailButton = CreateFrame("Button", nil, footerPanel, "UIPanelButtonTemplate")
     splitMailButton:SetSize(132, 22)
     splitMailButton:SetPoint("LEFT", resetButton, "RIGHT", 10, 0)
     splitMailButton:SetText("Раздать почтой")
@@ -2364,6 +2548,7 @@ function addon:CreateMainWindow()
     splitMailButton:SetScript("OnLeave", function()
         GameTooltip:Hide()
     end)
+    splitMailButton:Hide()
 
     frame.footerText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     frame.footerText:SetPoint("RIGHT", footerPanel, "RIGHT", -12, 0)
@@ -2404,6 +2589,7 @@ function addon:CreateMainWindow()
     frame.historyRows = historyRows
     frame.summaryRows = summaryRows
     frame.spendingRows = spendingRows
+    frame.debtRows = debtRows
     frame.lootRows = lootRows
     frame.damageRows = damageRows
     frame.splitRows = splitRows
@@ -2461,6 +2647,30 @@ local function clearFocusAndCommitSplitField(selfBox, field, resetCursor)
     selfBox.skipNextFocusLostCommit = true
     selfBox:ClearFocus()
     commitSplitFieldEdit(selfBox, field, resetCursor)
+end
+
+local function commitSalePaidAmount(selfBox)
+    local saleIndex
+
+    if not selfBox then
+        return
+    end
+
+    saleIndex = tonumber(selfBox.saleIndex)
+
+    if saleIndex and addon.UpdateSalePaidAmount then
+        addon:UpdateSalePaidAmount(saleIndex, selfBox:GetText())
+    end
+end
+
+local function clearFocusAndCommitSalePaidAmount(selfBox)
+    if not selfBox then
+        return
+    end
+
+    selfBox.skipNextFocusLostCommit = true
+    selfBox:ClearFocus()
+    commitSalePaidAmount(selfBox)
 end
 
 local SPLIT_NOTE_MAX_LETTERS = 255
@@ -2562,9 +2772,11 @@ function addon:RefreshSplitView(frame)
     local debtWidth = 54
     local netWidth = 56
     local sentWidth = 20
+    local removeWidth = 18
     local toggleWidth = 30
     local presetWidth = 20
-    local sentLeft = contentWidth - sentWidth - 14
+    local removeLeft = contentWidth - removeWidth - 6
+    local sentLeft = removeLeft - rightColumnGap - sentWidth
     local netLeft = sentLeft - rightColumnGap - netWidth
     local debtLeft = netLeft - rightColumnGap - debtWidth
     local toggleLeft = debtLeft - rightColumnGap - toggleWidth
@@ -2706,6 +2918,17 @@ function addon:RefreshSplitView(frame)
     frame.splitHeader.sent:SetPoint("LEFT", sentLeft, 0)
     frame.splitHeader.sent:SetWidth(sentWidth)
     frame.splitHeader.sent:SetJustifyH("CENTER")
+
+    if not frame.splitHeader.remove then
+        frame.splitHeader.remove = frame.splitHeader:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        frame.splitHeader.remove:SetText("X")
+    end
+
+    frame.splitHeader.remove:ClearAllPoints()
+    frame.splitHeader.remove:SetPoint("LEFT", removeLeft, 0)
+    frame.splitHeader.remove:SetWidth(removeWidth)
+    frame.splitHeader.remove:SetJustifyH("CENTER")
+    frame.splitHeader.remove:SetShown(canEdit)
 
     for index = 1, rowCount do
         local data = rows[index]
@@ -2870,10 +3093,27 @@ function addon:RefreshSplitView(frame)
                 sentTexture:SetVertexColor(0.15, 1, 0.15)
             end
 
+            row.removeButton = CreateFrame("Button", nil, row)
+            setupMiniActionButton(row.removeButton, removeWidth, 18, "X")
+            row.removeButton:SetFrameLevel(row:GetFrameLevel() + 4)
+            row.removeButton:SetScript("OnClick", function()
+                addon:ConfirmRemoveSplitPlayer(row.playerName)
+            end)
+            row.removeButton:SetScript("OnEnter", function(selfButton)
+                GameTooltip:SetOwner(selfButton, "ANCHOR_TOP")
+                GameTooltip:AddLine("Удалить игрока")
+                GameTooltip:AddLine("Исключает игрока из расчёта делёжки", 0.9, 0.9, 0.9)
+                GameTooltip:Show()
+            end)
+            row.removeButton:SetScript("OnLeave", function()
+                GameTooltip:Hide()
+            end)
+
             frame.splitRows[index] = row
         end
 
         row:SetSize(contentWidth, data.separator and 20 or 22)
+        row.separator = data.separator and true or false
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", 0, -((index - 1) * 24))
 
@@ -2912,8 +3152,12 @@ function addon:RefreshSplitView(frame)
         row.net:SetWidth(netWidth)
         row.sentCheck:ClearAllPoints()
         row.sentCheck:SetPoint("LEFT", sentLeft - 2, -1)
+        row.removeButton:ClearAllPoints()
+        row.removeButton:SetPoint("LEFT", removeLeft, 0)
 
         if data.separator then
+            row.playerName = nil
+            row.isSubstitute = nil
             row:SetBackdropColor(0.13, 0.05, 0.05, 0.92)
             row:SetBackdropBorderColor(0.55, 0.1, 0.1, 0.9)
             row.separatorLabel:SetText(data.title or "Замены")
@@ -2931,6 +3175,7 @@ function addon:RefreshSplitView(frame)
             row.debtBox:Hide()
             row.net:Hide()
             row.sentCheck:Hide()
+            row.removeButton:Hide()
             row:Show()
         else
             row:SetBackdropColor(0.08, 0.08, 0.08, 0.8)
@@ -2949,6 +3194,7 @@ function addon:RefreshSplitView(frame)
             row.debtBox:Show()
             row.net:Show()
             row.sentCheck:Show()
+            row.removeButton:Show()
         end
 
         if not data.separator then
@@ -3009,12 +3255,29 @@ function addon:RefreshSplitView(frame)
             row.bonusButton:SetEnabled(canEdit)
             row.modeButton:SetEnabled(canEdit)
             row.debtBox:EnableMouse(canEdit)
+            row.removeButton:SetShown(canEdit and not data.isLeader)
+            row.removeButton:SetEnabled(canEdit and not data.isLeader)
             row.modeButton:SetText(data.isSubstitute and "Осн" or "Зам")
             row.net:SetText(formatGold(data.net or 0))
-            row.sentCheck:SetChecked(data.sent and true or false)
+            row.sentCheck:SetChecked((data.sent or data.mailFailed) and true or false)
+
+            do
+                local sentTexture = row.sentCheck.GetCheckedTexture and row.sentCheck:GetCheckedTexture() or nil
+                local failed = data.mailFailed and true or false
+
+                if sentTexture and sentTexture.SetVertexColor then
+                    if failed then
+                        sentTexture:SetVertexColor(1, 0.1, 0.1)
+                    else
+                        sentTexture:SetVertexColor(0.15, 1, 0.15)
+                    end
+                end
+            end
 
             if (data.net or 0) < 0 then
                 row.net:SetTextColor(1, 0.35, 0.35)
+            elseif data.mailFailed then
+                row.net:SetTextColor(1, 0.25, 0.25)
             else
                 row.net:SetTextColor(1, 0.82, 0)
             end
@@ -3160,6 +3423,148 @@ function addon:RefreshSpendingView(frame, spending)
     frame.spendContent:SetHeight(math.max(rowCount * 24, 28))
 end
 
+function addon:RefreshDebtView(frame, debtSummary)
+    local data = debtSummary or self:BuildDebtSummary()
+    local rows = data and data.rows or {}
+    local rowCount = table.getn(rows)
+    local contentWidth = math.max(560, math.floor(((frame.debtListPanel and frame.debtListPanel:GetWidth()) or 656) - 36))
+    local actionWidth = 54
+    local debtWidth = 70
+    local paidWidth = 74
+    local amountWidth = 70
+    local winnerWidth = 110
+    local gap = 8
+    local actionLeft = contentWidth - actionWidth - 6
+    local debtLeft = actionLeft - gap - debtWidth
+    local paidLeft = debtLeft - gap - paidWidth
+    local amountLeft = paidLeft - gap - amountWidth
+    local winnerLeft = amountLeft - gap - winnerWidth
+    local itemWidth = math.max(120, winnerLeft - 18)
+    local index
+
+    frame.debtContent:SetWidth(contentWidth)
+    frame.debtTotalText:SetText("Долг всего: " .. formatGold(data.totalDebt or 0))
+    frame.debtCountText:SetText("Не оплачено: " .. tostring(data.unpaidCount or 0) .. " | Частично: " .. tostring(data.partialCount or 0))
+    frame.debtEmptyText:SetShown(rowCount == 0)
+
+    frame.debtHeader.item:SetWidth(itemWidth)
+    frame.debtHeader.winner:ClearAllPoints()
+    frame.debtHeader.winner:SetPoint("LEFT", winnerLeft, 0)
+    frame.debtHeader.winner:SetWidth(winnerWidth)
+    frame.debtHeader.amount:ClearAllPoints()
+    frame.debtHeader.amount:SetPoint("LEFT", amountLeft, 0)
+    frame.debtHeader.amount:SetWidth(amountWidth)
+    frame.debtHeader.amount:SetJustifyH("RIGHT")
+    frame.debtHeader.paid:ClearAllPoints()
+    frame.debtHeader.paid:SetPoint("LEFT", paidLeft, 0)
+    frame.debtHeader.paid:SetWidth(paidWidth)
+    frame.debtHeader.paid:SetJustifyH("CENTER")
+    frame.debtHeader.debt:ClearAllPoints()
+    frame.debtHeader.debt:SetPoint("LEFT", debtLeft, 0)
+    frame.debtHeader.debt:SetWidth(debtWidth)
+    frame.debtHeader.debt:SetJustifyH("RIGHT")
+    frame.debtHeader.action:ClearAllPoints()
+    frame.debtHeader.action:SetPoint("LEFT", actionLeft, 0)
+    frame.debtHeader.action:SetWidth(actionWidth)
+    frame.debtHeader.action:SetJustifyH("CENTER")
+
+    for index = 1, rowCount do
+        local rowData = rows[index]
+        local row = frame.debtRows[index]
+
+        if not row then
+            row = CreateFrame("Frame", nil, frame.debtContent)
+            createBackdrop(row, { 0.08, 0.08, 0.08, 0.8 }, { 0.25, 0.08, 0.08, 0.8 })
+
+            row.item = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.item:SetPoint("LEFT", 12, 0)
+            row.item:SetJustifyH("LEFT")
+
+            row.winner = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            row.winner:SetJustifyH("LEFT")
+
+            row.amount = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            row.amount:SetJustifyH("RIGHT")
+
+            row.paidBox = CreateFrame("EditBox", nil, row)
+            setupInputBox(row.paidBox, paidWidth, "0")
+            row.paidBox:SetScript("OnEnterPressed", function(selfBox)
+                clearFocusAndCommitSalePaidAmount(selfBox)
+            end)
+            row.paidBox:SetScript("OnEscapePressed", function(selfBox)
+                selfBox:ClearFocus()
+            end)
+            row.paidBox:SetScript("OnEditFocusLost", function(selfBox)
+                if selfBox.skipNextFocusLostCommit then
+                    selfBox.skipNextFocusLostCommit = nil
+                    return
+                end
+
+                commitSalePaidAmount(selfBox)
+            end)
+
+            row.debt = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            row.debt:SetJustifyH("RIGHT")
+
+            row.whisperButton = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+            setupMiniActionButton(row.whisperButton, actionWidth, 18, "Шёп")
+            row.whisperButton:SetScript("OnClick", function()
+                addon:WhisperSaleDebt(row.saleIndex)
+            end)
+            row.whisperButton:SetScript("OnEnter", function(selfButton)
+                GameTooltip:SetOwner(selfButton, "ANCHOR_TOP")
+                GameTooltip:AddLine("Напомнить о долге")
+                GameTooltip:AddLine("Отправляет покупателю шёпот с суммой долга", 0.9, 0.9, 0.9)
+                GameTooltip:Show()
+            end)
+            row.whisperButton:SetScript("OnLeave", function()
+                GameTooltip:Hide()
+            end)
+
+            frame.debtRows[index] = row
+        end
+
+        row:SetSize(contentWidth, 22)
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", 0, -((index - 1) * 24))
+        row.saleIndex = rowData.saleIndex
+        row.item:SetWidth(itemWidth)
+        row.winner:ClearAllPoints()
+        row.winner:SetPoint("LEFT", winnerLeft, 0)
+        row.winner:SetWidth(winnerWidth)
+        row.amount:ClearAllPoints()
+        row.amount:SetPoint("LEFT", amountLeft, 0)
+        row.amount:SetWidth(amountWidth)
+        row.paidBox:ClearAllPoints()
+        row.paidBox:SetPoint("LEFT", paidLeft, 0)
+        row.paidBox:SetWidth(paidWidth)
+        row.debt:ClearAllPoints()
+        row.debt:SetPoint("LEFT", debtLeft, 0)
+        row.debt:SetWidth(debtWidth)
+        row.whisperButton:ClearAllPoints()
+        row.whisperButton:SetPoint("LEFT", actionLeft, 0)
+
+        row.item:SetText(tostring(rowData.itemLink or rowData.itemName or "Лот"))
+        row.winner:SetText(tostring(rowData.winner or "-"))
+        row.amount:SetText(formatGold(rowData.amount or 0))
+        if not row.paidBox:HasFocus() then
+            row.paidBox.saleIndex = rowData.saleIndex
+            row.paidBox:SetText(tostring(rowData.paid or 0))
+        end
+        setInputBoxEnabled(row.paidBox, self:IsPlayerController())
+        row.debt:SetText(formatGold(rowData.debt or 0))
+        row.debt:SetTextColor(1, rowData.partial and 0.65 or 0.35, rowData.partial and 0.25 or 0.35)
+        row.whisperButton:SetEnabled(self:IsPlayerController())
+        row:Show()
+    end
+
+    for index = rowCount + 1, table.getn(frame.debtRows) do
+        frame.debtRows[index]:Hide()
+    end
+
+    frame.debtContent:SetHeight(math.max(rowCount * 24, 28))
+end
+
 function addon:RefreshLootView(frame, lootSummary)
     local data = lootSummary or self:BuildLootSummary()
     local rows = data and data.rows or {}
@@ -3241,6 +3646,8 @@ function addon:RefreshLootView(frame, lootSummary)
                     GameTooltip:AddLine("Подставляет предмет в верхний блок для следующего бида", 0.9, 0.9, 0.9)
                 elseif not addon:IsPlayerController() then
                     GameTooltip:AddLine("Только мастер лутер может выбрать предмет", 1, 0.2, 0.2)
+                elseif row.status == "auctioning" then
+                    GameTooltip:AddLine("Предмет уже выставлен на торги", 1, 0.8, 0.2)
                 elseif addon:IsAuctionActive() then
                     GameTooltip:AddLine("Сначала завершите текущий аукцион", 1, 0.2, 0.2)
                 else
@@ -3263,6 +3670,9 @@ function addon:RefreshLootView(frame, lootSummary)
                     GameTooltip:SetHyperlink(row.itemLink)
                     GameTooltip:AddLine("Босс: " .. tostring(row.bossName or "Прочее"), 0.95, 0.82, 0.28)
                     GameTooltip:AddLine("До передачи: " .. tostring(row.timeText or "-"), 0.9, 0.9, 0.9)
+                    if row.status == "auctioning" then
+                        GameTooltip:AddLine("Статус: в торгах", 1, 0.8, 0.2)
+                    end
                     if row.canSelect then
                         GameTooltip:AddLine("ЛКМ: перенести в слот бида", 0.7, 1, 0.7)
                     end
@@ -3285,6 +3695,7 @@ function addon:RefreshLootView(frame, lootSummary)
             row.itemLink = nil
             row.bossName = nil
             row.timeText = nil
+            row.status = nil
             row.canSelect = false
             row.separator = true
             row:SetBackdropColor(0.12, 0.03, 0.03, 0.88)
@@ -3302,7 +3713,8 @@ function addon:RefreshLootView(frame, lootSummary)
             local timeLeft = self:GetLootTransferTimeLeft(rowData)
             local timeText = self:FormatLootTimeLeft(timeLeft)
             local isSelected = selectedItemIdentity and getItemIdentity(rowData.itemLink) == selectedItemIdentity
-            local canSelect = canSelectAny and timeLeft > 0
+            local status = tostring(rowData.status or "pending")
+            local canSelect = canSelectAny and timeLeft > 0 and status == "pending"
 
             if rowData.itemLink and GetItemInfo then
                 local _, _, _, _, _, _, _, _, _, fetchedTexture = GetItemInfo(rowData.itemLink)
@@ -3313,6 +3725,7 @@ function addon:RefreshLootView(frame, lootSummary)
             row.itemLink = rowData.itemLink
             row.bossName = rowData.bossName
             row.timeText = timeText
+            row.status = status
             row.canSelect = canSelect
             row.separator = false
 
@@ -3369,7 +3782,7 @@ function addon:RefreshLootView(frame, lootSummary)
             row.actionButton:ClearAllPoints()
             row.actionButton:SetPoint("LEFT", actionLeft, 0)
             row.actionButton:SetEnabled(canSelect)
-            row.actionButton:SetText("В слот")
+            row.actionButton:SetText(status == "auctioning" and "Торги" or "В слот")
             row:Show()
         end
     end
@@ -3600,15 +4013,32 @@ function addon:RefreshMainWindow()
     local passes = self:GetSortedPasses()
     local auctionMode = self:GetCurrentAuctionMode()
     local isRollMode = auctionMode == "roll"
-    local split = self:ComputeDetailedSplit()
+    local activeTab = frame.activeTab or "auction"
+    -- split нужен на вкладке аукциона (футер "База 100%"), делёжки и сводки.
+    -- ComputeDetailedSplit дорогой (sort + 40 итераций по ростеру) — кешируем.
+    -- На вкладке "split"/"summary" всегда пересчитываем; на остальных — берём кеш.
+    local split
+    if activeTab == "split" or activeTab == "summary" then
+        split = self:ComputeDetailedSplit()
+        self.cachedSplit = split
+    else
+        split = self.cachedSplit
+        if not split then
+            split = self:ComputeDetailedSplit()
+            self.cachedSplit = split
+        end
+    end
     local itemLink = self.pendingItemLink or auction.itemLink
     local itemName = itemLink
     local texture = "Interface/Icons/INV_Misc_QuestionMark"
     local payout = GoldBidDB and GoldBidDB.ledger and GoldBidDB.ledger.payout
     local sales = GoldBidDB and GoldBidDB.ledger and GoldBidDB.ledger.sales or {}
-    local spending = self:BuildSpendingSummary()
-    local lootSummary = self:BuildLootSummary()
-    local damageSummary = self:BuildDamageSummary()
+    -- Тяжёлые суммаризации строим только для активной вкладки —
+    -- вызов каждые 0.2-0.5с для невидимых вкладок это источник микрофризов.
+    local spending      = (activeTab == "spend"   or activeTab == "summary") and self:BuildSpendingSummary()  or { totalSpent = 0, rows = {} }
+    local debtSummary   = (activeTab == "debt")   and self:BuildDebtSummary()      or { totalDebt = 0, unpaidCount = 0, partialCount = 0, rows = {} }
+    local lootSummary   = (activeTab == "loot")   and self:BuildLootSummary()    or { totalCount = 0, urgentCount = 0, bossCount = 0, rows = {} }
+    local damageSummary = (activeTab == "damage")  and self:BuildDamageSummary() or { segmentName = "-", playerCount = 0, rows = {}, segments = {} }
     local saleCount = table.getn(sales)
     local isController = self:IsPlayerController()
     local hasFullAccess = self:HasFullInterfaceAccess()
@@ -3624,6 +4054,15 @@ function addon:RefreshMainWindow()
     local passWidth
     local summaryContentWidth = math.floor(((frame.summaryListPanel and frame.summaryListPanel:GetWidth()) or 656) - 36)
     local summaryWinnerLeft
+    local summaryWinnerWidth = 104
+    local summaryAmountWidth = 72
+    local summaryPaidWidth = 74
+    local summaryDebtWidth = 74
+    local summaryColumnGap = 8
+    local summaryRightInset
+    local summaryAmountLeft
+    local summaryPaidLeft
+    local summaryDebtLeft
     local timeLeft = self:GetTimeLeft()
     local index
 
@@ -3676,11 +4115,15 @@ function addon:RefreshMainWindow()
         passWidth = 0
     end
 
-    if summaryContentWidth < 320 then
-        summaryContentWidth = 320
+    if summaryContentWidth < 560 then
+        summaryContentWidth = 560
     end
 
-    summaryWinnerLeft = math.max(180, summaryContentWidth - 150)
+    summaryRightInset = isController and 30 or 8
+    summaryDebtLeft = summaryContentWidth - summaryRightInset - summaryDebtWidth
+    summaryPaidLeft = summaryDebtLeft - summaryColumnGap - summaryPaidWidth
+    summaryAmountLeft = summaryPaidLeft - summaryColumnGap - summaryAmountWidth
+    summaryWinnerLeft = math.max(170, summaryAmountLeft - summaryColumnGap - summaryWinnerWidth)
 
     frame.tableHeader:SetWidth(leftWidth)
     frame.passHeader:SetShown(hasFullAccess)
@@ -3696,6 +4139,19 @@ function addon:RefreshMainWindow()
     frame.summaryContent:SetWidth(summaryContentWidth)
     frame.summaryHeader.winner:ClearAllPoints()
     frame.summaryHeader.winner:SetPoint("LEFT", summaryWinnerLeft, 0)
+    frame.summaryHeader.winner:SetWidth(summaryWinnerWidth)
+    frame.summaryHeader.amount:ClearAllPoints()
+    frame.summaryHeader.amount:SetPoint("LEFT", summaryAmountLeft, 0)
+    frame.summaryHeader.amount:SetWidth(summaryAmountWidth)
+    frame.summaryHeader.amount:SetJustifyH("RIGHT")
+    frame.summaryHeader.paid:ClearAllPoints()
+    frame.summaryHeader.paid:SetPoint("LEFT", summaryPaidLeft, 0)
+    frame.summaryHeader.paid:SetWidth(summaryPaidWidth)
+    frame.summaryHeader.paid:SetJustifyH("CENTER")
+    frame.summaryHeader.debt:ClearAllPoints()
+    frame.summaryHeader.debt:SetPoint("LEFT", summaryDebtLeft, 0)
+    frame.summaryHeader.debt:SetWidth(summaryDebtWidth)
+    frame.summaryHeader.debt:SetJustifyH("RIGHT")
 
     frame.tableHeader.player:SetWidth(math.max(90, leftWidth - 160))
     frame.tableHeader.amount:ClearAllPoints()
@@ -3819,6 +4275,9 @@ function addon:RefreshMainWindow()
         local sale = sales[index]
         local row = frame.summaryRows[index]
         local itemLabel
+        local saleAmount = math.max(0, math.floor(tonumber(sale and sale.amount) or 0))
+        local paidAmount = self.GetSalePaidAmount and self:GetSalePaidAmount(sale) or math.max(0, math.floor(tonumber(sale and sale.paidAmount) or 0))
+        local debtAmount = self.GetSaleDebtAmount and self:GetSaleDebtAmount(sale) or math.max(0, saleAmount - paidAmount)
 
         if not row then
             row = CreateFrame("Frame", nil, frame.summaryContent)
@@ -3841,6 +4300,36 @@ function addon:RefreshMainWindow()
             row.amount:SetPoint("RIGHT", -28, 0)
             row.amount:SetWidth(72)
             row.amount:SetJustifyH("RIGHT")
+
+            row.paidBox = CreateFrame("EditBox", nil, row)
+            setupInputBox(row.paidBox, 74, "0")
+            row.paidBox:SetScript("OnEnterPressed", function(selfBox)
+                clearFocusAndCommitSalePaidAmount(selfBox)
+            end)
+            row.paidBox:SetScript("OnEscapePressed", function(selfBox)
+                selfBox:ClearFocus()
+            end)
+            row.paidBox:SetScript("OnEditFocusLost", function(selfBox)
+                if selfBox.skipNextFocusLostCommit then
+                    selfBox.skipNextFocusLostCommit = nil
+                    return
+                end
+
+                commitSalePaidAmount(selfBox)
+            end)
+            row.paidBox:SetScript("OnEnter", function(selfBox)
+                GameTooltip:SetOwner(selfBox, "ANCHOR_TOP")
+                GameTooltip:AddLine("Отдано золота")
+                GameTooltip:AddLine("Введите, сколько покупатель уже передал за этот лот", 0.9, 0.9, 0.9)
+                GameTooltip:Show()
+            end)
+            row.paidBox:SetScript("OnLeave", function()
+                GameTooltip:Hide()
+            end)
+
+            row.debt = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            row.debt:SetWidth(74)
+            row.debt:SetJustifyH("RIGHT")
 
             row.deleteButton = CreateFrame("Button", nil, row)
             setupMiniActionButton(row.deleteButton, 18, 18, "X")
@@ -3867,8 +4356,16 @@ function addon:RefreshMainWindow()
         row.item:SetWidth(summaryWinnerLeft - 58)
         row.winner:ClearAllPoints()
         row.winner:SetPoint("LEFT", summaryWinnerLeft, 0)
+        row.winner:SetWidth(summaryWinnerWidth)
         row.amount:ClearAllPoints()
-        row.amount:SetPoint("RIGHT", -28, 0)
+        row.amount:SetPoint("LEFT", summaryAmountLeft, 0)
+        row.amount:SetWidth(summaryAmountWidth)
+        row.paidBox:ClearAllPoints()
+        row.paidBox:SetPoint("LEFT", summaryPaidLeft, 0)
+        row.paidBox:SetWidth(summaryPaidWidth)
+        row.debt:ClearAllPoints()
+        row.debt:SetPoint("LEFT", summaryDebtLeft, 0)
+        row.debt:SetWidth(summaryDebtWidth)
         row.deleteButton:ClearAllPoints()
         row.deleteButton:SetPoint("RIGHT", -4, 0)
 
@@ -3877,7 +4374,24 @@ function addon:RefreshMainWindow()
         row.index:SetText(index)
         row.item:SetText(itemLabel)
         row.winner:SetText(tostring(sale.winner or "-"))
-        row.amount:SetText(formatGold(sale.amount or 0))
+        row.amount:SetText(formatGold(saleAmount))
+        if not row.paidBox:HasFocus() then
+            row.paidBox.saleIndex = index
+            row.paidBox:SetText(tostring(paidAmount))
+        end
+        if isController then
+            setInputBoxEnabled(row.paidBox, true)
+            row.paidBox:SetTextColor(1, 0.95, 0.8)
+        else
+            setInputBoxEnabled(row.paidBox, false)
+            row.paidBox:SetTextColor(0.9, 0.84, 0.72)
+        end
+        row.debt:SetText(formatGold(debtAmount))
+        if debtAmount > 0 then
+            row.debt:SetTextColor(1, 0.35, 0.35)
+        else
+            row.debt:SetTextColor(0.45, 1, 0.45)
+        end
         row.deleteButton:SetShown(isController)
         row.deleteButton:SetEnabled(isController)
         row:Show()
@@ -3888,16 +4402,30 @@ function addon:RefreshMainWindow()
     end
 
     frame.summaryContent:SetHeight(math.max(saleCount * 24, 28))
-    self:RefreshSpendingView(frame, spending)
-    self:RefreshLootView(frame, lootSummary)
-    self:RefreshDamageView(frame, damageSummary)
-    self:RefreshSplitView(frame)
+    -- Рендерим только активную вкладку; остальные скрыты и пересчитывать их не нужно.
+    if activeTab == "spend" or activeTab == "summary" then
+        self:RefreshSpendingView(frame, spending)
+    end
+    if activeTab == "debt" then
+        self:RefreshDebtView(frame, debtSummary)
+    end
+    if activeTab == "loot" then
+        self:RefreshLootView(frame, lootSummary)
+    end
+    if activeTab == "damage" then
+        self:RefreshDamageView(frame, damageSummary)
+    end
+    if activeTab == "split" then
+        self:RefreshSplitView(frame)
+    end
     frame.compactPotText:SetText(self:GetAuctionModeDisplayName(auctionMode))
 
     if frame.activeTab == "split" then
         frame.footerText:SetText("Банк: " .. formatGold(GoldBidDB.ledger.pot or 0))
     elseif frame.activeTab == "spend" then
         frame.footerText:SetText("Банк: " .. formatGold(GoldBidDB.ledger.pot or 0) .. " | Потрачено: " .. formatGold(spending.totalSpent or 0))
+    elseif frame.activeTab == "debt" then
+        frame.footerText:SetText("Долг: " .. formatGold(debtSummary.totalDebt or 0) .. " | Не оплачено: " .. tostring(debtSummary.unpaidCount or 0) .. " | Частично: " .. tostring(debtSummary.partialCount or 0))
     elseif frame.activeTab == "loot" then
         frame.footerText:SetText("Лут: " .. tostring(lootSummary.totalCount or 0) .. " | Срочно: " .. tostring(lootSummary.urgentCount or 0))
     elseif frame.activeTab == "damage" then
@@ -3928,3 +4456,4 @@ function addon:RefreshMainWindow()
     frame.addStepButton:SetEnabled((not hasPassed) and (not isRollMode))
     self:SetMainTab(frame.activeTab or "auction", true)
 end
+
